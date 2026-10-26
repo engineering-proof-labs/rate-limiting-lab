@@ -3,7 +3,7 @@
 **Status:** Accepted  
 **Date:** 2026-10-26  
 **Context:** Phase 08 — Concurrency & Failure Resilience  
-**Deciders:** Senior Backend Engineering Team
+**Deciders:** Project maintainer
 
 ---
 
@@ -82,10 +82,10 @@ In `src/middleware/rate-limit.ts`, the middleware catches any rejection thrown b
 
 #### Tested Guarantees
 
-1. **Network Disconnects:** If Redis is unreachable (`ECONNREFUSED`, `ETIMEDOUT`), the error is intercepted and routed to the configured `failurePolicy` (503 or `next()`).
-2. **Command Rejections:** If Redis rejects commands (e.g. `READONLY You can't write against a read only replica`, or memory limit reached), the rejection is handled cleanly without uncaught exceptions or application crashes.
+1. **Connection Refusal (`ECONNREFUSED`):** Verified against an unreachable Redis port (`127.0.0.1:6399`). The connection failure is intercepted and routed to the configured `failurePolicy` (`503 Service Unavailable` or `next()`). Other network failure modes (e.g. `ETIMEDOUT`, packet loss, network partitions, or OOM rejections from a saturated Redis daemon) are theoretically subject to the same catch-all block, but were not individually exercised against live network faults.
+2. **Injected Command Errors:** Verified using a simulated limiter error throwing a synthetic `READONLY` message. When a command rejection occurs, the error is handled cleanly according to the failure policy without uncaught exceptions or application crashes. (Note: This exercises middleware error handling via injected exception; it was not tested against a live read-only Redis replica).
 3. **Route Isolation:** Unmetered routes (`GET /health`, `GET /api/v1/unlimited`) never invoke `consume()` and remain 100% operational during Redis outages.
-4. **Self-Healing Recovery:** Once Redis connectivity is restored, the rate limiter immediately resumes normal quota enforcement without requiring application restarts.
+4. **Simulated Transient Failure & Recovery:** Verified using a delegating limiter wrapper that simulates a transient storage fault and subsequent recovery against retained Redis state. Quota enforcement resumes immediately from the previously admitted count without requiring application restarts. (Note: This exercises middleware state handling under simulated interruption; it does not test socket-level ioredis automatic reconnection).
 
 #### Known Limitations & Operational Considerations
 
@@ -103,8 +103,8 @@ In `src/middleware/rate-limit.ts`, the middleware catches any rejection thrown b
    - Concurrently rotating arbitrary untrusted identity headers (`X-Forwarded-For`, `X-Real-IP`, `X-Client-Id`) fails to evade rate limits because default Express configuration ignores unauthenticated proxy headers when `trust proxy` is false.
 2. **Tenant Quota Isolation:**
    - Concurrent bursts across independent client identities (`tenant-alpha` and `tenant-beta`) operate in complete isolation. High-volume contention on one identity does not deplete or stall another identity's quota.
-3. **Window Boundary Rollover:**
-   - Under concurrent burst traffic arriving precisely across an epoch window boundary, the counter resets atomically, the first request in the new window is counted ($C = 1$, $\text{remaining} = L - 1$), and the counter ceiling remains capped at $L + 1$.
+3. **Window Rollover Across Expiration:**
+   - Evaluated by executing a concurrent burst within Window 1, awaiting window expiration via Redis server-time synchronization (`redis.time()`), and executing a second concurrent burst in Window 2. The counter resets atomically, the first request in the new window is counted ($C = 1$, $\text{remaining} = L - 1$), and the counter ceiling remains capped at $L + 1$. (Note: This verifies quota rollover across expiration, but does not simulate requests arriving concurrently on opposite sides of a microsecond boundary).
 
 ---
 
@@ -115,7 +115,7 @@ In `src/middleware/rate-limit.ts`, the middleware catches any rejection thrown b
 - **Deterministic Concurrency Safety:** Verified across independent Express applications and separate Redis TCP connections.
 - **Fail-Closed Default:** Prevents cascading backend failures during Redis outages.
 - **Clean Failure Separation:** Dependency outages produce HTTP 503; quota exhaustion produces HTTP 429.
-- **Automatic Self-Healing:** Seamless recovery immediately upon Redis restoration.
+- **Self-Healing State Continuity:** Quota state in Redis is preserved and resumes correctly upon storage availability.
 
 ### Negative & Operational Requirements
 

@@ -3,7 +3,7 @@
 **Status:** Accepted (Amended in Phase 03.1)  
 **Date:** 2026-10-26  
 **Context:** Phase 03.1 — Architectural Design Refinement  
-**Deciders:** Senior Backend Engineering Team
+**Deciders:** Project maintainer
 
 ---
 

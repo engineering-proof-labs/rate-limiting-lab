@@ -125,7 +125,11 @@ describe('HTTP Concurrency & Failure Resilience Test Suite (Phase 08)', () => {
       }
 
       // Invariant 5: Stored counter in Redis hash saturates at limit + 1 (6), not 20
-      const storedCount = await limiter.getRawCounter('ip:127.0.0.1');
+      // Supports IPv4 127.0.0.1, IPv4-mapped IPv6 ::ffff:127.0.0.1, and IPv6 ::1 loopback formats
+      const storedCount =
+        (await limiter.getRawCounter('ip:127.0.0.1')) ??
+        (await limiter.getRawCounter('ip:::ffff:127.0.0.1')) ??
+        (await limiter.getRawCounter('ip:::1'));
       expect(storedCount).toBe(6);
     });
   });

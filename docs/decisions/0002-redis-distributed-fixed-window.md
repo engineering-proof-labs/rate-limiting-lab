@@ -3,7 +3,7 @@
 **Status:** Accepted  
 **Date:** 2026-10-26 (Amended post Phase 06 Targeted Review)  
 **Context:** Phase 06 — Distributed Fixed Window with Redis  
-**Deciders:** Senior Backend Engineering Team
+**Deciders:** Project maintainer
 
 ---
 

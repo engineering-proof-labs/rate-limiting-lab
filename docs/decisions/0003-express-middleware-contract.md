@@ -3,7 +3,7 @@
 **Status:** Accepted  
 **Date:** 2026-10-26  
 **Context:** Phase 07 — Express HTTP Middleware, Router & Contract Compliance  
-**Deciders:** Senior Backend Engineering Team
+**Deciders:** Project maintainer
 
 ---
 
