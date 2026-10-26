@@ -1,6 +1,10 @@
 export type { RateLimitPolicy, RateLimitResult, Clock } from './core/types.js';
 export { SystemClock, VirtualClock } from './core/clock.js';
 export { InMemoryFixedWindowRateLimiter } from './core/fixed-window.js';
+export {
+  RedisFixedWindowRateLimiter,
+  type RedisFixedWindowOptions,
+} from './storage/redis-fixed-window.js';
 
 export const LAB_METADATA = {
   name: 'rate-limiting-lab',
