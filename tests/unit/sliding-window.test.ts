@@ -257,6 +257,66 @@ describe('Phase 10 — Sliding Window In-Memory Reference Algorithms', () => {
       expect(res5.allowed).toBe(false);
     });
 
+    it('calculates accurate Retry-After and resetTimeMs reflecting continuous previous-window decay (reproduction of 60s overstatement)', () => {
+      const longPolicy: RateLimitPolicy = {
+        limit: 5,
+        windowMs: 60_000,
+      };
+      const limiter = new InMemorySlidingWindowCounterRateLimiter(longPolicy, clock);
+      const clientId = 'client-retry-decay';
+
+      // t = 0: admit 5 requests in Window 0
+      for (let i = 0; i < 5; i++) {
+        expect(limiter.consume(clientId).allowed).toBe(true);
+      }
+
+      // t = 60,000 ms: Window 1 begins. previousCount = 5, currentCount = 0.
+      // previousWeight = 1.0, estimatedCount = 5.0 >= 5 -> throttled.
+      clock.setTime(60_000);
+      const resThrottled = limiter.consume(clientId);
+      expect(resThrottled.allowed).toBe(false);
+
+      // The previous-window contribution decays continuously.
+      // At t = 60,001 ms, estimatedCount = 5 * (59,999 / 60,000) = 4.999916 < 5 -> admissible!
+      // Therefore, the earliest admission time is t = 60,001 ms (1 ms later), NOT t = 120,000 ms (60 seconds later).
+      // Retry-After must be 1 second, and resetTimeMs should reflect the earliest admissible time (60,001 ms).
+      expect(resThrottled.retryAfterSeconds).toBe(1);
+      expect(resThrottled.resetTimeMs).toBe(60_001);
+
+      // Verify that at t = 60,001 ms the request is indeed admitted!
+      clock.setTime(60_001);
+      const resNext = limiter.consume(clientId);
+      expect(resNext.allowed).toBe(true);
+      expect(resNext.remaining).toBe(0);
+    });
+
+    it('documents deliberate approximation: admits when estimatedCount < limit even if increment exceeds limit', () => {
+      const limiter = new InMemorySlidingWindowCounterRateLimiter(policy, clock);
+      const clientId = 'client-fractional-boundary';
+
+      // Window 0: 5 requests at t = 0
+      for (let i = 0; i < 5; i++) {
+        limiter.consume(clientId);
+      }
+
+      // At t = 1100 (100 ms into Window 1):
+      // previousWeight = (1000 - 100) / 1000 = 0.9
+      // estimatedCount = 5 * 0.9 + 0 = 4.5
+      clock.setTime(1100);
+      expect(limiter.getEstimatedCount(clientId)).toBeCloseTo(4.5, 5);
+
+      // Invariant: estimatedCount (4.5) < limit (5.0), so request is admitted.
+      // After admission, currentCount becomes 1, so post-admission estimated usage is 5.5 > 5.0.
+      const resAdmitted = limiter.consume(clientId);
+      expect(resAdmitted.allowed).toBe(true);
+      expect(resAdmitted.remaining).toBe(0); // 5 - floor(4.5 + 1) = 0
+
+      // Immediately throttled on subsequent request at t = 1100 (estimatedCount is now 5.5 >= 5.0)
+      const resThrottled = limiter.consume(clientId);
+      expect(resThrottled.allowed).toBe(false);
+      expect(resThrottled.remaining).toBe(0);
+    });
+
     it('demonstrates explicit mathematical divergence from exact Sliding Window Log', () => {
       // Comparison scenario:
       // In Window 0, 5 requests are sent all at t = 100 ms.

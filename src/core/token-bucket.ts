@@ -117,9 +117,19 @@ export class InMemoryTokenBucketRateLimiter {
       this.clients.set(key, state);
     }
 
-    // Refill tokens based on elapsed time since last deduction
+    // Refill tokens based on elapsed time since last deduction.
+    // Operation ordering: multiply before dividing to preserve exact integer ratios at refill boundaries
+    // (e.g. (49 * 1) / 49 = 1.0, whereas 49 * (1 / 49) = 0.9999999999999999 in IEEE 754 float).
+    // Bound elapsedMs by timeToFull to prevent numerical overflow on large elapsed times.
     const elapsedMs = Math.max(0, nowMs - state.lastRefillTimeMs);
-    const tokensToAdd = elapsedMs * (this.policy.refillRate / this.policy.refillIntervalMs);
+    const initialDeficit = this.policy.capacity - state.tokens;
+    const msToFill = Math.ceil(
+      initialDeficit * (this.policy.refillIntervalMs / this.policy.refillRate),
+    );
+    const tokensToAdd =
+      elapsedMs >= msToFill
+        ? initialDeficit
+        : (elapsedMs * this.policy.refillRate) / this.policy.refillIntervalMs;
     const availableTokens = Math.min(this.policy.capacity, state.tokens + tokensToAdd);
 
     // Determine admission: exact boundary check (no tolerance offsets)
@@ -186,7 +196,14 @@ export class InMemoryTokenBucketRateLimiter {
     }
     const nowMs = this.clock.now();
     const elapsedMs = Math.max(0, nowMs - state.lastRefillTimeMs);
-    const tokensToAdd = elapsedMs * (this.policy.refillRate / this.policy.refillIntervalMs);
+    const initialDeficit = this.policy.capacity - state.tokens;
+    const msToFill = Math.ceil(
+      initialDeficit * (this.policy.refillIntervalMs / this.policy.refillRate),
+    );
+    const tokensToAdd =
+      elapsedMs >= msToFill
+        ? initialDeficit
+        : (elapsedMs * this.policy.refillRate) / this.policy.refillIntervalMs;
     return Math.min(this.policy.capacity, state.tokens + tokensToAdd);
   }
 }

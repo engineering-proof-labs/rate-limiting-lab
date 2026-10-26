@@ -97,15 +97,39 @@ export class InMemorySlidingWindowCounterRateLimiter {
       };
     }
 
-    // Quota exhausted
-    const waitMs = Math.max(0, resetTimeMs - nowMs);
+    // Quota exhausted: derive earliest-admission time from the decaying weighted counter
+    // Admission occurs when: previousCount * ((windowMs - t_elapsed) / windowMs) + currentCount < limit
+    let earliestAdmissibleTimeMs: number;
+
+    if (state.currentCount >= this.policy.limit) {
+      // Current window already exhausted quota on its own; cannot open during this window
+      earliestAdmissibleTimeMs = resetTimeMs;
+    } else {
+      // previousCount > 0 must hold since currentCount < limit and estimatedCount >= limit
+      // Solve for t_elapsed:
+      // (windowMs - t_elapsed) / windowMs < (limit - currentCount) / previousCount
+      // t_elapsed > windowMs * (1 - (limit - currentCount) / previousCount)
+      const deficit = this.policy.limit - state.currentCount;
+      const thresholdElapsed = this.policy.windowMs * (1 - deficit / state.previousCount);
+      // Discrete millisecond time: earliest admissible integer millisecond is floor(thresholdElapsed) + 1
+      const admissibleElapsed = Math.floor(thresholdElapsed) + 1;
+
+      if (admissibleElapsed >= this.policy.windowMs) {
+        earliestAdmissibleTimeMs = resetTimeMs;
+      } else {
+        const windowStartMs = windowId * this.policy.windowMs;
+        earliestAdmissibleTimeMs = windowStartMs + admissibleElapsed;
+      }
+    }
+
+    const waitMs = Math.max(0, earliestAdmissibleTimeMs - nowMs);
     const retryAfterSeconds = Math.max(1, Math.ceil(waitMs / 1000));
 
     return {
       allowed: false,
       limit: this.policy.limit,
       remaining: 0,
-      resetTimeMs,
+      resetTimeMs: earliestAdmissibleTimeMs,
       retryAfterSeconds,
     };
   }

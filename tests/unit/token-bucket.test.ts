@@ -420,6 +420,62 @@ describe('InMemoryTokenBucketRateLimiter — Reference Unit Suite', () => {
           }),
       ).toThrow(/time per token exceeds Number.MAX_SAFE_INTEGER/i);
     });
+
+    it('admits exactly at refill interval boundary without premature or delayed admission (interval: 49 ms)', () => {
+      const boundaryPolicy: TokenBucketPolicy = {
+        capacity: 1,
+        refillRate: 1,
+        refillIntervalMs: 49,
+      };
+      const limiter = new InMemoryTokenBucketRateLimiter(boundaryPolicy, clock);
+      const clientId = 'client-boundary-49';
+
+      // t = 0: consume initial token
+      expect(limiter.consume(clientId).allowed).toBe(true);
+
+      // t = 48: must reject
+      clock.setTime(48);
+      const res48 = limiter.consume(clientId);
+      expect(res48.allowed).toBe(false);
+      expect(res48.remaining).toBe(0);
+
+      // t = 49: must admit (49 * (1/49) must not round below 1.0)
+      clock.setTime(49);
+      const res49 = limiter.consume(clientId);
+      expect(res49.allowed).toBe(true);
+      expect(res49.remaining).toBe(0);
+    });
+
+    it('enforces exact refill boundaries for nontrivial rates and intervals', () => {
+      const nontrivialPolicy: TokenBucketPolicy = {
+        capacity: 5,
+        refillRate: 3,
+        refillIntervalMs: 70,
+      };
+      const limiter = new InMemoryTokenBucketRateLimiter(nontrivialPolicy, clock);
+      const clientId = 'client-nontrivial-refill';
+
+      // Exhaust all 5 tokens at t = 0
+      for (let i = 0; i < 5; i++) {
+        limiter.consume(clientId);
+      }
+      expect(limiter.consume(clientId).allowed).toBe(false);
+
+      // At t = 69: (69 * 3) / 70 = 2.957 tokens refilled. Consuming cost 3 must be throttled.
+      clock.setTime(69);
+      expect(limiter.consume(clientId, 3).allowed).toBe(false);
+
+      // At t = 70: exactly 3.0 tokens refilled. Consuming cost 3 must succeed.
+      clock.setTime(70);
+      const res70 = limiter.consume(clientId, 3);
+      expect(res70.allowed).toBe(true);
+      expect(res70.remaining).toBe(0);
+
+      // At t = 140: exactly another 3.0 tokens refilled.
+      clock.setTime(140);
+      const res140 = limiter.consume(clientId, 3);
+      expect(res140.allowed).toBe(true);
+    });
   });
 
   describe('Policy Configuration Validation', () => {
