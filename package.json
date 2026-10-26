@@ -1,0 +1,40 @@
+{
+  "name": "rate-limiting-lab",
+  "version": "0.1.0",
+  "description": "A production-minded rate limiting lab built with TypeScript, Node.js, and Redis.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.0.0",
+    "npm": ">=10.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format:check": "prettier --check \"**/*.{ts,js,json,md}\" --ignore-path .gitignore",
+    "format": "prettier --write \"**/*.{ts,js,json,md}\" --ignore-path .gitignore",
+    "test": "vitest run --exclude \"tests/integration/**\"",
+    "test:integration": "vitest run tests/integration",
+    "test:all": "vitest run",
+    "verify": "npm run typecheck && npm run lint && npm run format:check && npm run test && npm run build"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "ioredis": "^5.5.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.20.0",
+    "@types/express": "^4.17.25",
+    "@types/node": "^22.13.4",
+    "@types/supertest": "^6.0.2",
+    "eslint": "^9.20.1",
+    "prettier": "^3.5.1",
+    "supertest": "^7.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.24.0",
+    "vitest": "^3.0.5"
+  }
+}

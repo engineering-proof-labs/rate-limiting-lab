@@ -147,3 +147,12 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# Local Agent Customizations
+.agents/
+.agent/
+
+# Local Roadmap & Prompts
+roadmap/
+
+
