@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from
 import request from 'supertest';
 import { Redis } from 'ioredis';
 import type { Express } from 'express';
-import { createApp } from '../../src/app/create-app.js';
+import { createApp, type CreateAppOptions } from '../../src/app/create-app.js';
 import { RedisFixedWindowRateLimiter } from '../../src/storage/redis-fixed-window.js';
 import type { RateLimitPolicy } from '../../src/core/types.js';
 import type { RateLimiter } from '../../src/middleware/rate-limit.js';
@@ -56,7 +56,7 @@ describe('Express HTTP Contract Test Suite', () => {
     }
   }
 
-  describe('Standard Profile (5 requests / 60,000 ms)', () => {
+  describe('Standard Profile (5 requests / 60,000 ms) with Demo Identity Mode', () => {
     const standardPolicy: RateLimitPolicy = {
       limit: 5,
       windowMs: 60_000,
@@ -73,7 +73,7 @@ describe('Express HTTP Contract Test Suite', () => {
       });
       await limiter.reset();
       await ensureWindowSafetyMargin(limiter, 1000);
-      app = createApp({ limiter });
+      app = createApp({ limiter, enableDemoHeaders: true });
     });
 
     afterEach(async () => {
@@ -145,7 +145,7 @@ describe('Express HTTP Contract Test Suite', () => {
       expect(res7.headers['x-ratelimit-remaining']).toBe('0');
     });
 
-    it('maintains independent quotas across different clients', async () => {
+    it('maintains independent quotas across different clients when demo headers are enabled', async () => {
       const clientA = 'client-iso-a';
       const clientB = 'client-iso-b';
 
@@ -163,24 +163,14 @@ describe('Express HTTP Contract Test Suite', () => {
       expect(resB.headers['x-ratelimit-remaining']).toBe('4');
     });
 
-    it('supports X-Client-Id as well as X-Demo-Client-Id', async () => {
+    it('supports X-Client-Id as well as X-Demo-Client-Id in demo mode', async () => {
       const res = await request(app).get('/api/v1/limited').set('X-Client-Id', 'client-compat');
 
       expect(res.status).toBe(200);
       expect(res.headers['x-ratelimit-remaining']).toBe('4');
     });
 
-    it('falls back to IP address when no client header is supplied', async () => {
-      const res1 = await request(app).get('/api/v1/limited');
-      expect(res1.status).toBe(200);
-      expect(res1.headers['x-ratelimit-remaining']).toBe('4');
-
-      const res2 = await request(app).get('/api/v1/limited');
-      expect(res2.status).toBe(200);
-      expect(res2.headers['x-ratelimit-remaining']).toBe('3');
-    });
-
-    it('rejects malformed client identifiers with HTTP 400 Bad Request', async () => {
+    it('rejects malformed client identifiers with HTTP 400 Bad Request in demo mode', async () => {
       // Space in identifier
       const res1 = await request(app)
         .get('/api/v1/limited')
@@ -205,10 +195,68 @@ describe('Express HTTP Contract Test Suite', () => {
     });
   });
 
-  describe('Route Mounting & Path Isolation Guards', () => {
+  describe('Secure Default Configuration (IP Anchoring & Header Spoofing Protection)', () => {
+    const securePolicy: RateLimitPolicy = {
+      limit: 5,
+      windowMs: 60_000,
+    };
+    const keyPrefix = 'test:http:secure-default';
+    let limiter: RedisFixedWindowRateLimiter;
     let app: Express;
 
-    beforeEach(() => {
+    beforeEach(async () => {
+      limiter = new RedisFixedWindowRateLimiter({
+        redis,
+        policy: securePolicy,
+        keyPrefix,
+      });
+      await limiter.reset();
+      await ensureWindowSafetyMargin(limiter, 1000);
+      // Default: enableDemoHeaders is omitted (false)
+      app = createApp({ limiter });
+    });
+
+    afterEach(async () => {
+      await limiter.reset();
+    });
+
+    it('strictly enforces quota by connection IP and prevents bypassing quota via rotating untrusted identity headers in default configuration', async () => {
+      // An attacker attempts to bypass rate limits by sending a distinct X-Demo-Client-Id or X-Client-Id header on each request
+      for (let i = 1; i <= 5; i++) {
+        const res = await request(app)
+          .get('/api/v1/limited')
+          .set('X-Demo-Client-Id', `attacker-id-${i}`)
+          .set('X-Client-Id', `attacker-alias-${i}`);
+
+        expect(res.status).toBe(200);
+        // Quota is decremented against connection IP, ignoring the spoofed headers
+        expect(res.headers['x-ratelimit-remaining']).toBe(String(5 - i));
+      }
+
+      // 6th request with yet another fresh header must still be throttled with HTTP 429
+      const res6 = await request(app)
+        .get('/api/v1/limited')
+        .set('X-Demo-Client-Id', 'attacker-fresh-identity');
+
+      expect(res6.status).toBe(429);
+      expect(res6.headers['x-ratelimit-remaining']).toBe('0');
+      expect(res6.body).toMatchObject({ error: 'Too Many Requests' });
+    });
+  });
+
+  describe('Route Mounting & Misconfiguration Defense', () => {
+    it('throws a descriptive error if createApp is invoked without a configured limiter', () => {
+      // Defense against accidental unprotected routing
+      expect(() => (createApp as unknown as () => void)()).toThrow(
+        'createApp requires a configured RateLimiter instance',
+      );
+
+      expect(() => createApp({} as unknown as CreateAppOptions)).toThrow(
+        'createApp requires a configured RateLimiter instance',
+      );
+    });
+
+    it('exposes GET /health unthrottled and without rate limit headers', async () => {
       const dummyLimiter: RateLimiter = {
         policy: { limit: 5, windowMs: 60_000 },
         consume: () => ({
@@ -218,10 +266,8 @@ describe('Express HTTP Contract Test Suite', () => {
           resetTimeMs: Date.now() + 60_000,
         }),
       };
-      app = createApp({ limiter: dummyLimiter });
-    });
+      const app = createApp({ limiter: dummyLimiter });
 
-    it('exposes GET /health unthrottled and without rate limit headers', async () => {
       const res = await request(app).get('/health');
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ status: 'ok' });
@@ -230,6 +276,17 @@ describe('Express HTTP Contract Test Suite', () => {
     });
 
     it('exposes GET /api/v1/unlimited unthrottled and without consuming quota', async () => {
+      const dummyLimiter: RateLimiter = {
+        policy: { limit: 5, windowMs: 60_000 },
+        consume: () => ({
+          allowed: true,
+          limit: 5,
+          remaining: 4,
+          resetTimeMs: Date.now() + 60_000,
+        }),
+      };
+      const app = createApp({ limiter: dummyLimiter });
+
       const res = await request(app).get('/api/v1/unlimited');
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ success: true, message: 'Unlimited endpoint' });
@@ -237,7 +294,47 @@ describe('Express HTTP Contract Test Suite', () => {
       expect(res.headers['x-ratelimit-remaining']).toBeUndefined();
     });
 
+    it('proves that unrestricted routes (/health, /api/v1/unlimited) never invoke limiter.consume()', async () => {
+      let consumeCalls = 0;
+      const observableLimiter: RateLimiter = {
+        policy: { limit: 5, windowMs: 60_000 },
+        consume: () => {
+          consumeCalls++;
+          return {
+            allowed: true,
+            limit: 5,
+            remaining: 4,
+            resetTimeMs: Date.now() + 60_000,
+          };
+        },
+      };
+      const app = createApp({ limiter: observableLimiter });
+
+      // Calling /health must not invoke consume
+      await request(app).get('/health');
+      expect(consumeCalls).toBe(0);
+
+      // Calling /api/v1/unlimited must not invoke consume
+      await request(app).get('/api/v1/unlimited');
+      expect(consumeCalls).toBe(0);
+
+      // Calling /api/v1/limited must invoke consume exactly once
+      await request(app).get('/api/v1/limited');
+      expect(consumeCalls).toBe(1);
+    });
+
     it('prevents route mounting bugs: /limited, /api/limited, and double-prefix /api/api/v1 return 404', async () => {
+      const dummyLimiter: RateLimiter = {
+        policy: { limit: 5, windowMs: 60_000 },
+        consume: () => ({
+          allowed: true,
+          limit: 5,
+          remaining: 4,
+          resetTimeMs: Date.now() + 60_000,
+        }),
+      };
+      const app = createApp({ limiter: dummyLimiter });
+
       const res1 = await request(app).get('/limited');
       expect(res1.status).toBe(404);
 
@@ -260,15 +357,11 @@ describe('Express HTTP Contract Test Suite', () => {
       },
     };
 
-    it('defaults to fail-closed returning HTTP 503 Service Unavailable and NEVER 429', async () => {
-      const app = createApp({
-        limiter: failingLimiter,
-        failurePolicy: 'fail-closed',
-      });
+    it('defaults to fail-closed returning HTTP 503 Service Unavailable when failurePolicy is completely omitted', async () => {
+      // Note: failurePolicy is intentionally omitted to verify fail-closed default
+      const app = createApp({ limiter: failingLimiter });
 
-      const res = await request(app)
-        .get('/api/v1/limited')
-        .set('X-Demo-Client-Id', 'client-fail-closed');
+      const res = await request(app).get('/api/v1/limited');
 
       expect(res.status).toBe(503);
       expect(res.body).toEqual({
@@ -281,15 +374,13 @@ describe('Express HTTP Contract Test Suite', () => {
       expect(res.status).not.toBe(429);
     });
 
-    it('delegates to route handler when configured with fail-open and sets diagnostic header', async () => {
+    it('delegates to route handler when explicitly configured with fail-open and sets diagnostic header', async () => {
       const app = createApp({
         limiter: failingLimiter,
         failurePolicy: 'fail-open',
       });
 
-      const res = await request(app)
-        .get('/api/v1/limited')
-        .set('X-Demo-Client-Id', 'client-fail-open');
+      const res = await request(app).get('/api/v1/limited');
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual({
@@ -318,7 +409,7 @@ describe('Express HTTP Contract Test Suite', () => {
       });
       await limiter.reset();
       await ensureWindowSafetyMargin(limiter, 400);
-      app = createApp({ limiter });
+      app = createApp({ limiter, enableDemoHeaders: true });
     });
 
     afterEach(async () => {

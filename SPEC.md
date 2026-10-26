@@ -84,18 +84,25 @@ To guarantee correctness across deployment modes, we explicitly distinguish thre
 
 ## 4. Client Identity & Trust Boundaries
 
-### 4.1 Demo Identity Strategy
+### 4.1 Default Secure Identity Strategy (Connection IP Anchoring)
 
-For this laboratory, client identity resolution follows this precedence:
+By default, rate-limiting key resolution anchors strictly to the connection's TCP remote socket IP address (`ip:${req.ip ?? req.socket.remoteAddress ?? '127.0.0.1'}`).
 
-1. `X-Client-Id` header (if provided, sanitized: `/^[a-zA-Z0-9_-]{1,64}$/`).
-2. `X-Forwarded-For` header (first IP in chain, if behind a trusted reverse proxy).
-3. `req.ip` / remote socket IP (fallback).
+- **Spoofing Prevention:** Caller-supplied identity headers (`X-Demo-Client-Id`, `X-Client-Id`, `X-Forwarded-For`) are completely ignored by default. This prevents callers from evading quota enforcement by cycling through fabricated client identifiers.
+- **Trusted Proxy Deployment:** Express `trust proxy` is NOT enabled globally by default, and `X-Forwarded-For` is not blindly trusted. When deploying behind a trusted reverse proxy (e.g., Nginx, Cloudflare, AWS ALB), `trust proxy` must be configured explicitly at the deployment edge, or a verified custom `keyGenerator` must be supplied.
 
-### 4.2 Security Disclaimer (Production vs Lab)
+### 4.2 Opt-In Demo Identity Strategy (`enableDemoHeaders: true`)
+
+For automated laboratory demonstrations and multi-client test fixtures, demo header inspection may be explicitly enabled via configuration (`enableDemoHeaders: true`):
+
+1. `X-Demo-Client-Id` / `X-Client-Id` header (sanitized: `/^[a-zA-Z0-9_-]{1,64}$/`).
+2. Malformed headers immediately return `400 Bad Request` (`{"error": "Bad Request", "message": "Malformed client identifier..."}`).
+3. Falls back to connection IP if headers are absent.
+
+### 4.3 Security Notice (Production vs Lab)
 
 > [!CAUTION]
-> **Trust Boundary Notice:** Client-supplied HTTP headers (such as `X-Client-Id` or untrusted `X-Forwarded-For`) can be arbitrarily forged by malicious clients. In a production environment, rate-limiting keys must be derived from cryptographically authenticated identities (e.g., validated JWT `sub`, authenticated API key hash, or verified mTLS client certificate). Client IP addresses should only be used as a coarse-grained unauthenticated fallback behind a strictly validated proxy chain.
+> **Trust Boundary Notice:** Client-supplied HTTP headers can be arbitrarily forged by untrusted callers. Outside controlled demonstration environments, rate-limiting keys must be derived from cryptographically authenticated identities (e.g., validated JWT `sub`, authenticated API key hash, or verified mTLS client certificate). Client IP addresses serve only as an unauthenticated fallback.
 
 ---
 

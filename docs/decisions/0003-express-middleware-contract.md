@@ -21,21 +21,24 @@ Phase 07 requires exposing the rate-limiting functionality over HTTP using Expre
 
 ## 2. Decision Log
 
-### 2.1 Route Architecture & Mounting
+### 2.1 Route Architecture & Mandatory Limiter Protection
 
 - **Routes:**
   - `GET /health`: Liveness probe. Completely bypasses rate limiting; returns `200 OK` `{"status": "ok"}` with no rate-limit headers.
   - `GET /api/v1/unlimited`: Unthrottled control route mounted on the API router; returns `200 OK` `{"success": true, "message": "Unlimited endpoint"}` with no rate-limit headers.
   - `GET /api/v1/limited`: Protected endpoint guarded by `createRateLimitMiddleware`. Returns `200 OK` when admitted; returns `429 Too Many Requests` when quota is exhausted.
+- **Mandatory Limiter Protection:** `createApp()` strictly requires a valid `RateLimiter` instance. If omitted, it immediately throws a runtime error. This ensures a supposedly rate-limited route can never be accidentally or silently exposed without its limiter configured.
 - **Mounting Invariant:** API routes are mounted strictly on `/api/v1`. Calling `/limited`, `/api/limited`, or `/api/api/v1/limited` returns `404 Not Found`, guarding against silent route nesting bugs.
 
-### 2.2 Client Identity Strategy & Input Validation
+### 2.2 Client Identity Strategy: Secure IP Default vs Opt-In Demo Headers
 
-- **Precedence:**
-  1. `X-Demo-Client-Id` (primary demo header)
-  2. `X-Client-Id` (standard legacy header)
-  3. Client IP address (`req.ip ?? req.socket.remoteAddress ?? '127.0.0.1'`) as fallback.
-- **Validation Rule:** If a client header is provided, it must match `/^[a-zA-Z0-9_-]{1,64}$/`. If it contains invalid characters, whitespace, or exceeds 64 characters, the middleware immediately returns `400 Bad Request` (`{"error": "Bad Request", "message": "Malformed client identifier..."}`). This prevents bypassing rate limiting with garbage or oversized keys.
+- **Default Secure Mode (Connection IP Anchoring):**
+  - By default, client keys resolve strictly to the TCP remote socket IP address (`ip:${req.ip ?? req.socket.remoteAddress ?? '127.0.0.1'}`).
+  - Caller-supplied identity headers (`X-Demo-Client-Id`, `X-Client-Id`, `X-Forwarded-For`) are completely ignored by default. This eliminates quota bypass attacks where clients rotate arbitrary unauthenticated headers.
+- **Opt-In Demo Headers (`enableDemoHeaders: true`):**
+  - For automated multi-client demonstrations and benchmarking suites, header-based client identification can be explicitly enabled.
+  - When enabled, `X-Demo-Client-Id` or `X-Client-Id` is parsed and validated against `/^[a-zA-Z0-9_-]{1,64}$/`. Malformed headers immediately return `400 Bad Request`.
+- **Proxy Considerations:** Global Express `trust proxy` is disabled by default to prevent spoofed `X-Forwarded-For` injection. When deploying behind a trusted reverse proxy (e.g. Nginx, ALB), proxy trust must be configured at the deployment edge and custom `keyGenerator` used for verified identity claims.
 
 ### 2.3 HTTP Header Contract & Status Codes
 

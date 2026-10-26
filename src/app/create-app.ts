@@ -6,11 +6,17 @@ import {
 } from '../middleware/rate-limit.js';
 
 export interface CreateAppOptions {
-  readonly limiter?: RateLimiter | undefined;
+  readonly limiter: RateLimiter;
   readonly failurePolicy?: FailurePolicy | undefined;
+  readonly enableDemoHeaders?: boolean | undefined;
+  readonly keyGenerator?: ((req: Request) => string) | undefined;
 }
 
-export function createApp(options?: CreateAppOptions): Express {
+export function createApp(options: CreateAppOptions): Express {
+  if (!options || !options.limiter) {
+    throw new Error('createApp requires a configured RateLimiter instance');
+  }
+
   const app = express();
 
   app.use(express.json());
@@ -28,20 +34,19 @@ export function createApp(options?: CreateAppOptions): Express {
     res.status(200).json({ success: true, message: 'Unlimited endpoint' });
   });
 
-  // Protected endpoint with rate limiting
-  if (options?.limiter) {
-    const rateLimitMiddleware = createRateLimitMiddleware({
-      limiter: options.limiter,
-      failurePolicy: options.failurePolicy,
-    });
-    apiV1Router.get('/limited', rateLimitMiddleware, (_req: Request, res: Response) => {
-      res.status(200).json({ success: true, message: 'Access granted' });
-    });
-  } else {
-    apiV1Router.get('/limited', (_req: Request, res: Response) => {
-      res.status(200).json({ success: true, message: 'Access granted' });
-    });
-  }
+  // Protected endpoint with rate limiting — always guarded by rateLimitMiddleware
+  const rateLimitMiddleware = createRateLimitMiddleware({
+    limiter: options.limiter,
+    ...(options.failurePolicy !== undefined ? { failurePolicy: options.failurePolicy } : {}),
+    ...(options.enableDemoHeaders !== undefined
+      ? { enableDemoHeaders: options.enableDemoHeaders }
+      : {}),
+    ...(options.keyGenerator !== undefined ? { keyGenerator: options.keyGenerator } : {}),
+  });
+
+  apiV1Router.get('/limited', rateLimitMiddleware, (_req: Request, res: Response) => {
+    res.status(200).json({ success: true, message: 'Access granted' });
+  });
 
   // Mount router at /api/v1
   app.use('/api/v1', apiV1Router);

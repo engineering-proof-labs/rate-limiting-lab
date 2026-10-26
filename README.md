@@ -71,8 +71,10 @@ curl -i http://localhost:3000/api/v1/unlimited
 
 ### 2.3 Protected Rate-Limited Route
 
+> _Note:_ Demonstrative headers (`X-Demo-Client-Id`) require `enableDemoHeaders: true` in `createApp()`. Default configuration anchors quota strictly to connection client IP to prevent header spoofing.
+
 ```bash
-# Request with explicit client identifier (Allowed, requests 1–5)
+# Request with explicit client identifier in demo mode (Allowed, requests 1–5)
 curl -i -H "X-Demo-Client-Id: client_alpha" http://localhost:3000/api/v1/limited
 ```
 

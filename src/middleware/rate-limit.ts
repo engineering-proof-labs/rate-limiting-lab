@@ -11,12 +11,35 @@ export type FailurePolicy = 'fail-closed' | 'fail-open';
 export interface RateLimitMiddlewareOptions {
   readonly limiter: RateLimiter;
   readonly failurePolicy?: FailurePolicy | undefined;
+  readonly enableDemoHeaders?: boolean | undefined;
   readonly keyGenerator?: ((req: Request) => string) | undefined;
 }
 
 const CLIENT_ID_REGEX = /^[a-zA-Z0-9_-]{1,64}$/;
 
+/**
+ * Default secure key generator.
+ *
+ * Anchors strictly to the socket connection IP address to prevent clients from
+ * bypassing rate limits by rotating arbitrary unauthenticated headers (X-Client-Id, etc.).
+ *
+ * Proxy Note: When deployed behind a trusted reverse proxy (e.g. Nginx, Cloudflare),
+ * configure Express `trust proxy` deliberately and supply an application-level keyGenerator
+ * that parses verified proxy identity headers.
+ */
 export function defaultKeyGenerator(req: Request): string {
+  const ip = req.ip ?? req.socket.remoteAddress ?? '127.0.0.1';
+  return `ip:${ip}`;
+}
+
+/**
+ * Demo / testing key generator.
+ *
+ * Inspects `X-Demo-Client-Id` or `X-Client-Id` for multi-client demonstration suites.
+ * Validates against `/^[a-zA-Z0-9_-]{1,64}$/`. Throws MALFORMED_CLIENT_ID if invalid.
+ * Falls back to client IP if headers are absent.
+ */
+export function demoHeaderKeyGenerator(req: Request): string {
   const rawId = req.headers['x-demo-client-id'] ?? req.headers['x-client-id'];
 
   if (rawId !== undefined) {
@@ -27,19 +50,25 @@ export function defaultKeyGenerator(req: Request): string {
     throw new Error('MALFORMED_CLIENT_ID');
   }
 
-  // Fallback to client IP
-  const ip = req.ip ?? req.socket.remoteAddress ?? '127.0.0.1';
-  return `ip:${ip}`;
+  return defaultKeyGenerator(req);
 }
 
 export function createRateLimitMiddleware(options: RateLimitMiddlewareOptions): RequestHandler {
-  const { limiter, failurePolicy = 'fail-closed', keyGenerator = defaultKeyGenerator } = options;
+  const {
+    limiter,
+    failurePolicy = 'fail-closed',
+    enableDemoHeaders = false,
+    keyGenerator,
+  } = options;
+
+  const activeKeyGenerator =
+    keyGenerator ?? (enableDemoHeaders ? demoHeaderKeyGenerator : defaultKeyGenerator);
 
   return (req: Request, res: Response, next: NextFunction): void => {
     void (async () => {
       let clientKey: string;
       try {
-        clientKey = keyGenerator(req);
+        clientKey = activeKeyGenerator(req);
       } catch (err) {
         if (err instanceof Error && err.message === 'MALFORMED_CLIENT_ID') {
           res.status(400).json({

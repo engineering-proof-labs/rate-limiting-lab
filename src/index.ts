@@ -8,6 +8,7 @@ export {
 export {
   createRateLimitMiddleware,
   defaultKeyGenerator,
+  demoHeaderKeyGenerator,
   type RateLimiter,
   type FailurePolicy,
   type RateLimitMiddlewareOptions,
