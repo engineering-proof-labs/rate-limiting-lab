@@ -23,9 +23,10 @@ This laboratory adheres to **focused modularity without architectural ceremony**
 ```
 src/
 ├── core/                       # Pure domain engine & types (zero dependencies)
-│   ├── types.ts                # RateLimitResult, RateLimitPolicy, Clock
+│   ├── types.ts                # RateLimitResult, RateLimitPolicy, TokenBucketPolicy, Clock
 │   ├── clock.ts                # SystemClock, VirtualClock
-│   └── fixed-window.ts         # Pure mathematical window calculation
+│   ├── fixed-window.ts         # Fixed Window Counter reference implementation
+│   └── token-bucket.ts         # Token Bucket reference implementation
 │
 ├── storage/                    # Storage backends
 │   ├── storage.interface.ts    # RateLimiterStorage interface

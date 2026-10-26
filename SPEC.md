@@ -62,6 +62,20 @@ The laboratory evaluates four distinct algorithms with differing accuracy, fairn
 | **Sliding Window Counter** | **Weighted approximation** | $O(1)$ (current + prior count) | Low memory; estimates count assuming uniform distribution in prior window.             |
 | **Token Bucket**           | Rate + Burst smoothing     | $O(1)$ (tokens + last refill)  | Continuous token refill; explicitly permits bursts up to bucket capacity $B$.          |
 
+### 2.4 Token Bucket Model
+
+The Token Bucket algorithm models rate limiting via a bucket of tokens accumulating continuously at a fixed refill rate up to a configured burst capacity:
+
+- **State Representation:** Stored as tuple $(tokens, lastRefillTimeMs)$ where $tokens \in [0, B]$ is a floating-point number.
+- **Refill Formula:**
+  $$\Delta t = \max(0, t - lastRefillTimeMs)$$
+  $$\Delta tokens = \Delta t \times \left(\frac{r}{I}\right)$$
+  $$tokens = \min(B, tokens + \Delta tokens)$$
+- **Admission Invariants:**
+  - If $tokens \ge K$: **Admitted** (`allowed: true`), $tokens = tokens - K$, $remaining = \lfloor tokens / K \rfloor$.
+  - If $tokens < K$: **Throttled** (`allowed: false`), $remaining = 0$, $retryAfterSeconds = \max(1, \lceil (K - tokens) \times (I / r) / 1000 \rceil)$.
+- **Scope Note:** In Phase 09, Token Bucket is implemented as an in-memory reference engine (`InMemoryTokenBucketRateLimiter`). Distributed Redis coordination is documented in ADR 0005 and reserved for potential future distributed phases.
+
 ---
 
 ## 3. Distributed Clock Consistency & Time Authority

@@ -1,7 +1,7 @@
 # Test Coverage & Verification Matrix — Rate Limiting Laboratory
 
-**Document Version:** 1.5.0  
-**Phase:** 08 — Concurrency & Failure Resilience  
+**Document Version:** 1.6.0  
+**Phase:** 09 — Token Bucket Reference Implementation  
 **Repository:** `engineering-proof-labs/rate-limiting-lab`
 
 ---
@@ -42,9 +42,13 @@ Verification is organized into three distinct tiers with clear clock boundaries:
 | **REQ-20** | Window Rollover across Expiration     | Contract (Supertest)     | `tests/contract/http-concurrency-resilience.test.ts` > _"handles concurrent bursts across window expiration with exact quota reset"_                                                | **Verified** (HTTP Contract & Concurrency) |
 | **REQ-21** | Connection Refusal & Command Errors   | Contract (Supertest)     | `tests/contract/http-concurrency-resilience.test.ts` > _"returns HTTP 503... when Redis connection is refused"_ & synthetic command error                                           | **Verified** (HTTP Contract & Resilience)  |
 | **REQ-22** | Simulated Outage & State Recovery     | Contract (Supertest)     | `tests/contract/http-concurrency-resilience.test.ts` > _"recovers immediately and resumes exact quota enforcement when storage returns after an outage"_                            | **Verified** (HTTP Contract & Resilience)  |
+| **REQ-23** | Token Bucket Burst & Exhaustion       | Unit (Virtual Clock)     | `tests/unit/token-bucket.test.ts` > _"initializes a fresh client with full capacity and allows an immediate burst of 5 requests"_                                                   | **Verified** (Unit — Token Bucket)         |
+| **REQ-24** | Continuous Refill & Exact Boundaries  | Unit (Virtual Clock)     | `tests/unit/token-bucket.test.ts` > _"rejects at 999 ms and admits exactly at 1000 ms refill boundary"_                                                                             | **Verified** (Unit — Token Bucket)         |
+| **REQ-25** | Saturation & Precision Snapping       | Unit (Virtual Clock)     | `tests/unit/token-bucket.test.ts` > _"caps accumulated tokens strictly at capacity after long idle periods"_ & fractional checks                                                    | **Verified** (Unit — Token Bucket)         |
+| **REQ-26** | Clock Skew & Backward Step Defense    | Unit (Virtual Clock)     | `tests/unit/token-bucket.test.ts` > _"prevents negative elapsed time from deducting tokens when system clock steps backward"_                                                       | **Verified** (Unit — Token Bucket)         |
 
 > [!NOTE]
-> **Boundary Notice:** Tier 1 in-memory tests prove deterministic mathematical algorithm correctness and state transitions for single-process Node.js execution. Tier 2 contract and Tier 3 Redis integration tests prove real distributed race safety, atomic admission, and shared server-time coordination across independent limiter instances on a healthy Redis primary. Neither tier substitutes for failover durability testing across asynchronous replication replicas.
+> **Boundary Notice:** Tier 1 in-memory tests prove deterministic mathematical algorithm correctness and state transitions for single-process Node.js execution (Fixed Window and Token Bucket). Tier 2 contract and Tier 3 Redis integration tests prove real distributed race safety, atomic admission, and shared server-time coordination across independent limiter instances on a healthy Redis primary. Neither tier substitutes for failover durability testing across asynchronous replication replicas.
 
 ---
 

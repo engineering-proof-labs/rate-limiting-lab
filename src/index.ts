@@ -1,6 +1,7 @@
-export type { RateLimitPolicy, RateLimitResult, Clock } from './core/types.js';
+export type { RateLimitPolicy, TokenBucketPolicy, RateLimitResult, Clock } from './core/types.js';
 export { SystemClock, VirtualClock } from './core/clock.js';
 export { InMemoryFixedWindowRateLimiter } from './core/fixed-window.js';
+export { InMemoryTokenBucketRateLimiter } from './core/token-bucket.js';
 export {
   RedisFixedWindowRateLimiter,
   type RedisFixedWindowOptions,
