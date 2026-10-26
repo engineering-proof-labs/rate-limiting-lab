@@ -45,9 +45,10 @@ Let $L$ be the configured quota limit ($L \in \mathbb{N}^+$, e.g., $L = 5$):
    - If $C > L$: The request is **throttled** (`allowed: false`). Remaining quota is:
      $$\text{remaining} = 0$$
      _(Remaining quota must never be negative)._
-3. **Counter Saturation vs Demand Tracking:**
-   - In the baseline atomic implementation, rejected requests increment the counter up to a capped ceiling of $L + 1$ (or track exact demand without unbounded memory growth), while remaining capacity is strictly bounded: $\text{remaining} = \max(0, L - C)$.
-   - Key expiration TTL is set **strictly on the initial request** of window $k$ ($C = 1$). Subsequent requests (whether admitted or rejected) do **not** refresh or extend the TTL.
+3. **Counter Saturation & Memory Retention Semantics:**
+   - Rejected requests increment the counter up to a capped ceiling of $L + 1$ to record quota breach without unbounded integer growth. Remaining capacity is strictly bounded: $\text{remaining} = \max(0, L - C)$.
+   - _Memory Retention Distinction:_ Capping the counter per key prevents integer overflow and bounds the per-entry data size. However, in the single-process in-memory implementation (`Map`), it does **not** prevent memory growth from high client key cardinality ($O(U)$ where $U$ is the number of distinct client identifiers). Inactive client keys are retained until explicit `reset()`. In distributed Redis deployments (Phase 06), this cardinality retention is solved via automatic key TTL expiration.
+   - Key expiration TTL in Redis is set **strictly on the initial request** of window $k$ ($C = 1$). Subsequent requests (whether admitted or rejected) do **not** refresh or extend the TTL.
 4. **Window Transition:** When time advances to window $k + 1$, the previous counter is discarded/expired. The first request in window $k + 1$ initializes counter $C = 1$, is admitted, and consumes 1 token ($\text{remaining} = L - 1$).
 
 ### 2.3 Comparative Algorithm Accuracy & Tradeoffs

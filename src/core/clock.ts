@@ -10,6 +10,9 @@ export class VirtualClock implements Clock {
   private currentTimeMs: number;
 
   constructor(initialTimeMs = 0) {
+    if (!Number.isSafeInteger(initialTimeMs) || initialTimeMs < 0) {
+      throw new Error('Initial timestamp must be a non-negative safe integer');
+    }
     this.currentTimeMs = initialTimeMs;
   }
 
@@ -18,13 +21,20 @@ export class VirtualClock implements Clock {
   }
 
   public advance(deltaMs: number): void {
-    if (deltaMs < 0) {
-      throw new Error('VirtualClock cannot advance backwards');
+    if (!Number.isSafeInteger(deltaMs) || deltaMs < 0) {
+      throw new Error('Advance delta must be a non-negative safe integer');
     }
-    this.currentTimeMs += deltaMs;
+    const next = this.currentTimeMs + deltaMs;
+    if (!Number.isSafeInteger(next)) {
+      throw new Error('Resulting timestamp exceeds maximum safe integer');
+    }
+    this.currentTimeMs = next;
   }
 
   public setTime(timestampMs: number): void {
+    if (!Number.isSafeInteger(timestampMs) || timestampMs < 0) {
+      throw new Error('Timestamp must be a non-negative safe integer');
+    }
     this.currentTimeMs = timestampMs;
   }
 }

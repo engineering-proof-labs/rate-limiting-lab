@@ -6,34 +6,48 @@ interface ClientWindowState {
   windowId: number;
 }
 
+/**
+ * In-memory reference implementation of Fixed Window Counter rate limiting.
+ *
+ * Memory retention characteristics:
+ * State is stored in a JavaScript Map keyed by client identifier. For an active client,
+ * stale windows are replaced on subsequent requests. However, inactive client keys are
+ * retained in memory until explicit `reset()` is called. In distributed deployments,
+ * this is handled by Redis key TTL expiration.
+ */
 export class InMemoryFixedWindowRateLimiter {
+  public readonly policy: Readonly<RateLimitPolicy>;
   private readonly clients = new Map<string, ClientWindowState>();
 
   constructor(
-    public readonly policy: RateLimitPolicy,
+    policy: RateLimitPolicy,
     private readonly clock: Clock = new SystemClock(),
   ) {
     this.validatePolicy(policy);
+    this.policy = Object.freeze({ ...policy });
   }
 
   private validatePolicy(policy: RateLimitPolicy): void {
-    if (!Number.isInteger(policy.limit) || policy.limit <= 0) {
-      throw new Error('Rate limit must be a positive integer');
+    if (!Number.isSafeInteger(policy.limit) || policy.limit <= 0) {
+      throw new Error('Rate limit must be a positive safe integer');
     }
-    if (!Number.isInteger(policy.windowMs) || policy.windowMs <= 0) {
-      throw new Error('Window duration must be a positive integer in milliseconds');
+    if (!Number.isSafeInteger(policy.windowMs) || policy.windowMs <= 0) {
+      throw new Error('Window duration must be a positive safe integer in milliseconds');
     }
   }
 
-  public consume(key: string, explicitNowMs?: number): RateLimitResult {
-    const nowMs = explicitNowMs !== undefined ? explicitNowMs : this.clock.now();
+  public consume(key: string): RateLimitResult {
+    const nowMs = this.clock.now();
+    if (!Number.isSafeInteger(nowMs) || nowMs < 0) {
+      throw new Error('Clock returned an invalid timestamp');
+    }
+
     const windowId = Math.floor(nowMs / this.policy.windowMs);
     const resetTimeMs = (windowId + 1) * this.policy.windowMs;
 
     const existing = this.clients.get(key);
 
     if (!existing || existing.windowId !== windowId) {
-      // First request in a new window: admitted and counted
       this.clients.set(key, { count: 1, windowId });
       return {
         allowed: true,
@@ -53,7 +67,7 @@ export class InMemoryFixedWindowRateLimiter {
       };
     }
 
-    // Quota exhausted: cap counter at limit + 1 and reject
+    // Quota exhausted: cap stored counter at limit + 1
     existing.count = this.policy.limit + 1;
     const retryAfterSeconds = Math.max(1, Math.ceil((resetTimeMs - nowMs) / 1000));
 
@@ -72,9 +86,5 @@ export class InMemoryFixedWindowRateLimiter {
     } else {
       this.clients.clear();
     }
-  }
-
-  public getClientState(key: string): Readonly<ClientWindowState> | undefined {
-    return this.clients.get(key);
   }
 }
