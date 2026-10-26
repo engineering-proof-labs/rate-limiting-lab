@@ -1,8 +1,7 @@
 # Algorithm Comparison: Rate Limiting Strategies & Tradeoffs
 
-**Repository:** `engineering-proof-labs/rate-limiting-lab`  
-**Phase:** 10 — Sliding Window Log & Sliding Window Counter  
-**Author:** Project maintainer
+**Repository:** `engineering-proof-labs/rate-limiting-lab`
+**Phase:** 10 — Sliding Window Log & Sliding Window Counter
 
 ---
 

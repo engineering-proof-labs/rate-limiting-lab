@@ -1,7 +1,7 @@
 # Test Coverage & Verification Matrix — Rate Limiting Laboratory
 
-**Document Version:** 1.7.0  
-**Phase:** 10 — Sliding Window Log & Sliding Window Counter  
+**Document Version:** 1.8.0  
+**Phase:** 11 — Changing Requirements & Architecture Tradeoffs  
 **Repository:** `engineering-proof-labs/rate-limiting-lab`
 
 ---
@@ -48,6 +48,8 @@ Verification is organized into three distinct tiers with clear clock boundaries:
 | **REQ-26** | Clock Skew & Backward Step Defense    | Unit (Virtual Clock)     | `tests/unit/token-bucket.test.ts` > _"prevents negative elapsed time from deducting tokens when system clock steps backward"_                                                       | **Verified** (Unit — Token Bucket)           |
 | **REQ-27** | Sliding Window Log Exact Rolling Log  | Unit (Virtual Clock)     | `tests/unit/sliding-window.test.ts` > _"A. InMemorySlidingWindowLogRateLimiter (Exact Log)"_ (boundary, bursts, memory hygiene)                                                     | **Verified** (Unit — Sliding Window Log)     |
 | **REQ-28** | Sliding Window Counter Weighted Est.  | Unit (Virtual Clock)     | `tests/unit/sliding-window.test.ts` > _"B. InMemorySlidingWindowCounterRateLimiter (Weighted Approximation)"_ (weighted estimation, divergence)                                     | **Verified** (Unit — Sliding Window Counter) |
+| **REQ-29** | Token Bucket Exact Boundary Arith.    | Unit (Virtual Clock)     | `tests/unit/token-bucket.test.ts` > _"admits exactly at refill interval boundary without premature or delayed admission (interval: 49 ms)"_                                         | **Verified** (Unit — Token Bucket)           |
+| **REQ-30** | Sliding Window Counter Decay Retry    | Unit (Virtual Clock)     | `tests/unit/sliding-window.test.ts` > _"calculates accurate Retry-After and resetTimeMs reflecting continuous previous-window decay"_                                               | **Verified** (Unit — Sliding Window Counter) |
 
 > [!NOTE]
 > **Boundary Notice:** Tier 1 in-memory tests prove deterministic mathematical algorithm correctness and state transitions for single-process Node.js execution (Fixed Window, Token Bucket, Sliding Window Log, and Sliding Window Counter). Tier 2 contract and Tier 3 Redis integration tests prove real distributed race safety, atomic admission, and shared server-time coordination across independent limiter instances on a healthy Redis primary. Neither tier substitutes for failover durability testing across asynchronous replication replicas.
