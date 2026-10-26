@@ -2,6 +2,8 @@ export type { RateLimitPolicy, TokenBucketPolicy, RateLimitResult, Clock } from 
 export { SystemClock, VirtualClock } from './core/clock.js';
 export { InMemoryFixedWindowRateLimiter } from './core/fixed-window.js';
 export { InMemoryTokenBucketRateLimiter } from './core/token-bucket.js';
+export { InMemorySlidingWindowLogRateLimiter } from './core/sliding-window-log.js';
+export { InMemorySlidingWindowCounterRateLimiter } from './core/sliding-window-counter.js';
 export {
   RedisFixedWindowRateLimiter,
   type RedisFixedWindowOptions,
