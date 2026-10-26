@@ -5,6 +5,14 @@ export {
   RedisFixedWindowRateLimiter,
   type RedisFixedWindowOptions,
 } from './storage/redis-fixed-window.js';
+export {
+  createRateLimitMiddleware,
+  defaultKeyGenerator,
+  type RateLimiter,
+  type FailurePolicy,
+  type RateLimitMiddlewareOptions,
+} from './middleware/rate-limit.js';
+export { createApp, type CreateAppOptions } from './app/create-app.js';
 
 export const LAB_METADATA = {
   name: 'rate-limiting-lab',
