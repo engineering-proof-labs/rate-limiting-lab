@@ -7,30 +7,24 @@ interface ClientBucketState {
 }
 
 /**
- * Numerical precision epsilon for floating-point token calculations.
- * Used to guard against IEEE 754 summation errors (e.g. 10 * 0.1 = 0.9999999999999999).
- */
-const EPSILON = 1e-9;
-
-/**
  * In-memory reference implementation of the Token Bucket rate limiting algorithm.
  *
  * Operational contract:
- * - Capacity (B): Maximum tokens stored in the bucket; defines maximum burst size.
+ * - Capacity (B): Maximum tokens stored in the bucket; defines maximum burst capacity.
  * - Refill Rate (r) / Interval (I): Refills r tokens every I milliseconds.
  * - Initial state: A new client starts with a full bucket (tokens = capacity).
- * - Continuous fractional refill: Accrues tokens proportional to elapsed time:
- *   deltaTokens = elapsedMs * (refillRate / refillIntervalMs).
- *   Internal state tracks fractional tokens (IEEE 754 float) to prevent starvation under rapid checks.
- * - Precision snapping: Snaps to exact integer within EPSILON to prevent floating point drift.
+ * - Continuous refill: Evaluated on arrival based on elapsed time since last deduction:
+ *   currentTokens = min(capacity, storedTokens + elapsedMs * (refillRate / refillIntervalMs)).
+ * - Exact admission boundary: Admitted if currentTokens >= cost (tokens decremented by cost);
+ *   throttled if currentTokens < cost (stored state remains untouched).
+ * - Fractional credit preservation: When requests are throttled, lastRefillTimeMs is NOT updated,
+ *   preserving fractional elapsed time and eliminating cumulative rounding error under polling.
  * - Saturation: During inactivity, tokens cap strictly at capacity (never overflows).
- * - Exact admission boundary: Admitted if tokens + EPSILON >= cost (tokens decremented by cost);
- *   throttled if tokens < cost (tokens unchanged).
  * - Meaning of remaining capacity: When admitted, floor(tokens / costPerRequest); when throttled, 0.
  * - Retry-After: Seconds until enough tokens accrue to satisfy the requested cost.
  * - Reset time: Timestamp when the bucket will replenish back to full capacity.
- * - Clock regression defense: Elapsed time is clamped to >= 0, so backward clock adjustments
- *   do not deduct tokens.
+ * - Clock regression defense: If system clock steps backward, elapsed time is treated as 0 and
+ *   lastRefillTimeMs is not regressed, preventing duplicate token refills.
  * - Memory retention: State is stored in a JavaScript Map keyed by client identifier.
  *   Inactive clients remain in memory until explicit reset().
  */
@@ -65,6 +59,22 @@ export class InMemoryTokenBucketRateLimiter {
     if (!Number.isSafeInteger(policy.refillIntervalMs) || policy.refillIntervalMs <= 0) {
       throw new Error('Refill interval must be a positive safe integer in milliseconds');
     }
+
+    // Numerical limits validation: verify derived refill rates do not underflow to zero or overflow
+    const ratePerMs = policy.refillRate / policy.refillIntervalMs;
+    const msPerToken = policy.refillIntervalMs / policy.refillRate;
+
+    if (ratePerMs <= 0 || !Number.isFinite(ratePerMs)) {
+      throw new Error(
+        'Refill rate and interval result in numerical underflow (tokens per millisecond must be positive and finite)',
+      );
+    }
+    if (!Number.isFinite(msPerToken) || msPerToken > Number.MAX_SAFE_INTEGER) {
+      throw new Error(
+        'Refill rate is too small: time per token exceeds Number.MAX_SAFE_INTEGER milliseconds',
+      );
+    }
+
     if (
       policy.costPerRequest !== undefined &&
       (!Number.isSafeInteger(policy.costPerRequest) || policy.costPerRequest <= 0)
@@ -105,36 +115,26 @@ export class InMemoryTokenBucketRateLimiter {
         lastRefillTimeMs: nowMs,
       };
       this.clients.set(key, state);
-    } else {
-      // Refill tokens based on elapsed time since last refill
-      const elapsedMs = Math.max(0, nowMs - state.lastRefillTimeMs);
-      if (elapsedMs > 0) {
-        const tokensToAdd = elapsedMs * (this.policy.refillRate / this.policy.refillIntervalMs);
-        state.tokens = Math.min(this.policy.capacity, state.tokens + tokensToAdd);
-
-        // Snap to nearest integer if within floating-point epsilon
-        if (Math.abs(state.tokens - Math.round(state.tokens)) < EPSILON) {
-          state.tokens = Math.round(state.tokens);
-        }
-
-        state.lastRefillTimeMs = nowMs;
-      }
     }
 
-    // Determine admission
-    if (state.tokens + EPSILON >= cost) {
-      state.tokens = Math.max(0, state.tokens - cost);
+    // Refill tokens based on elapsed time since last deduction
+    const elapsedMs = Math.max(0, nowMs - state.lastRefillTimeMs);
+    const tokensToAdd = elapsedMs * (this.policy.refillRate / this.policy.refillIntervalMs);
+    const availableTokens = Math.min(this.policy.capacity, state.tokens + tokensToAdd);
 
-      // Snap to nearest integer if within floating-point epsilon
-      if (Math.abs(state.tokens - Math.round(state.tokens)) < EPSILON) {
-        state.tokens = Math.round(state.tokens);
+    // Determine admission: exact boundary check (no tolerance offsets)
+    if (availableTokens >= cost) {
+      state.tokens = availableTokens - cost;
+      // Advance lastRefillTimeMs forward (defend against backward clock jumps regressing refill timestamp)
+      if (nowMs > state.lastRefillTimeMs) {
+        state.lastRefillTimeMs = nowMs;
       }
 
       const tokensDeficit = this.policy.capacity - state.tokens;
       const msToFull = Math.ceil(
         tokensDeficit * (this.policy.refillIntervalMs / this.policy.refillRate),
       );
-      const resetTimeMs = nowMs + msToFull;
+      const resetTimeMs = Math.min(Number.MAX_SAFE_INTEGER, nowMs + msToFull);
 
       return {
         allowed: true,
@@ -144,18 +144,23 @@ export class InMemoryTokenBucketRateLimiter {
       };
     }
 
-    // Throttled: insufficient tokens
-    const tokensNeeded = Math.max(0, cost - state.tokens);
+    // Throttled: insufficient tokens.
+    // Crucial: state.tokens and state.lastRefillTimeMs remain unchanged so that fractional
+    // elapsed time continues to accumulate toward the next admission without truncation loss.
+    const tokensNeeded = cost - availableTokens;
     const waitMs = Math.ceil(
       tokensNeeded * (this.policy.refillIntervalMs / this.policy.refillRate),
     );
-    const retryAfterSeconds = Math.max(1, Math.ceil(waitMs / 1000));
+    const retryAfterSeconds = Math.min(
+      Math.floor(Number.MAX_SAFE_INTEGER / 1000),
+      Math.max(1, Math.ceil(waitMs / 1000)),
+    );
 
-    const tokensDeficit = this.policy.capacity - state.tokens;
+    const tokensDeficit = this.policy.capacity - availableTokens;
     const msToFull = Math.ceil(
       tokensDeficit * (this.policy.refillIntervalMs / this.policy.refillRate),
     );
-    const resetTimeMs = nowMs + msToFull;
+    const resetTimeMs = Math.min(Number.MAX_SAFE_INTEGER, nowMs + msToFull);
 
     return {
       allowed: false,
@@ -176,6 +181,12 @@ export class InMemoryTokenBucketRateLimiter {
 
   public getTokens(key: string): number | null {
     const state = this.clients.get(key);
-    return state ? state.tokens : null;
+    if (!state) {
+      return null;
+    }
+    const nowMs = this.clock.now();
+    const elapsedMs = Math.max(0, nowMs - state.lastRefillTimeMs);
+    const tokensToAdd = elapsedMs * (this.policy.refillRate / this.policy.refillIntervalMs);
+    return Math.min(this.policy.capacity, state.tokens + tokensToAdd);
   }
 }

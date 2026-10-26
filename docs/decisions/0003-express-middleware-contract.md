@@ -1,9 +1,8 @@
 # ADR 0003: Express Rate Limit Middleware, Routing Topologies & Error Handling
 
-**Status:** Accepted  
-**Date:** 2026-10-26  
-**Context:** Phase 07 — Express HTTP Middleware, Router & Contract Compliance  
-**Deciders:** Project maintainer
+**Status:** Accepted
+**Date:** 2026-10-26
+**Context:** Phase 07 — Express HTTP Middleware, Router & Contract Compliance
 
 ---
 

@@ -1,9 +1,8 @@
 # ADR 0001: Initial Architecture, Algorithm Scope & Concurrency Contracts
 
-**Status:** Accepted (Amended in Phase 03.1)  
-**Date:** 2026-10-26  
-**Context:** Phase 03.1 — Architectural Design Refinement  
-**Deciders:** Project maintainer
+**Status:** Accepted (Amended in Phase 03.1)
+**Date:** 2026-10-26
+**Context:** Phase 03.1 — Architectural Design Refinement
 
 ---
 

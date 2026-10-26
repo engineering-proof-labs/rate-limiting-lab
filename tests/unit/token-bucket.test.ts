@@ -307,12 +307,118 @@ describe('InMemoryTokenBucketRateLimiter — Reference Unit Suite', () => {
       expect(limiter.getTokens(clientId)).toBe(3);
     });
 
+    it('prevents duplicate token refill when clock steps backward and advances back to previous timestamp', () => {
+      const limiter = new InMemoryTokenBucketRateLimiter(policy, clock);
+      const clientId = 'client-clock-dup';
+
+      clock.setTime(10_000);
+      // Consume all 5 tokens at t = 10,000
+      for (let i = 0; i < 5; i++) {
+        limiter.consume(clientId);
+      }
+      expect(limiter.getTokens(clientId)).toBe(0);
+
+      // Clock steps backward to 5,000 and advances to 8,000
+      clock.setTime(5_000);
+      limiter.consume(clientId); // Throttled, elapsed = 0
+      clock.setTime(8_000);
+      limiter.consume(clientId); // Throttled, elapsed = 0 (still < 10,000)
+
+      expect(limiter.getTokens(clientId)).toBe(0);
+
+      // Clock advances to 11,000 (1 second past the original 10,000 anchor)
+      clock.setTime(11_000);
+      const res = limiter.consume(clientId);
+      // Exactly 1 token refilled from 10,000 to 11,000 (not 6 tokens from 5,000 to 11,000)
+      expect(res.allowed).toBe(true);
+      expect(res.remaining).toBe(0);
+      expect(limiter.getTokens(clientId)).toBe(0);
+    });
+
     it('throws when clock returns non-safe-integer or negative timestamp', () => {
       const badClock = { now: () => -50 };
       const limiter = new InMemoryTokenBucketRateLimiter(policy, badClock);
       expect(() => limiter.consume('client-bad-time')).toThrow(
         'Clock returned an invalid timestamp',
       );
+    });
+  });
+
+  describe('Numerical Robustness & Edge Cases (Phase 09 Corrections)', () => {
+    it('rejects premature admission before sufficient refill accrued (reproduction of EPSILON premature grant)', () => {
+      const longIntervalPolicy: TokenBucketPolicy = {
+        capacity: 1,
+        refillRate: 1,
+        refillIntervalMs: 1_000_000_000_000,
+      };
+      const limiter = new InMemoryTokenBucketRateLimiter(longIntervalPolicy, clock);
+      const clientId = 'client-long-interval';
+
+      // At t = 0: consume initial token
+      const res0 = limiter.consume(clientId);
+      expect(res0.allowed).toBe(true);
+      expect(res0.remaining).toBe(0);
+
+      // At t = 999_999_999_000 ms: bucket has 0.999999999 tokens (< 1 required).
+      // Must be rejected.
+      clock.advance(999_999_999_000);
+      const resThrottled = limiter.consume(clientId);
+      expect(resThrottled.allowed).toBe(false);
+      expect(resThrottled.remaining).toBe(0);
+
+      // At t = 1_000_000_000_000 ms: bucket has exactly 1.0 token. Must be admitted.
+      clock.advance(1_000);
+      const resAllowed = limiter.consume(clientId);
+      expect(resAllowed.allowed).toBe(true);
+      expect(resAllowed.remaining).toBe(0);
+    });
+
+    it('preserves fractional token accrual under rapid 1 ms polling without truncation loss', () => {
+      const slowRefillPolicy: TokenBucketPolicy = {
+        capacity: 1,
+        refillRate: 5e-7,
+        refillIntervalMs: 1000,
+      };
+      const limiter = new InMemoryTokenBucketRateLimiter(slowRefillPolicy, clock);
+      const clientId = 'client-polling';
+
+      // Consume initial token at t = 0
+      const res0 = limiter.consume(clientId);
+      expect(res0.allowed).toBe(true);
+
+      // Poll 1,000 times at 1 ms increments
+      for (let i = 0; i < 1000; i++) {
+        clock.advance(1);
+        const pollRes = limiter.consume(clientId);
+        expect(pollRes.allowed).toBe(false);
+      }
+
+      // After 1000 ms, accrued fractional tokens should be approximately 5e-7 (not 0)
+      const currentTokens = limiter.getTokens(clientId);
+      expect(currentTokens).not.toBeNull();
+      expect(currentTokens).toBeCloseTo(5e-7, 12);
+    });
+
+    it('rejects refill rates and intervals causing numerical underflow or overflow', () => {
+      // Underflow: ratePerMs <= 0 due to Number.MIN_VALUE
+      expect(
+        () =>
+          new InMemoryTokenBucketRateLimiter({
+            capacity: 1,
+            refillRate: Number.MIN_VALUE,
+            refillIntervalMs: 1000,
+          }),
+      ).toThrow(/numerical underflow|positive and finite/i);
+
+      // Overflow: time per token exceeds Number.MAX_SAFE_INTEGER
+      expect(
+        () =>
+          new InMemoryTokenBucketRateLimiter({
+            capacity: 1,
+            refillRate: 1e-16,
+            refillIntervalMs: 1_000_000,
+          }),
+      ).toThrow(/time per token exceeds Number.MAX_SAFE_INTEGER/i);
     });
   });
 

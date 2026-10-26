@@ -1,9 +1,8 @@
 # ADR 0004: Rate Limiting Failure Policies, Concurrency Invariants & Availability Tradeoffs
 
-**Status:** Accepted  
-**Date:** 2026-10-26  
-**Context:** Phase 08 — Concurrency & Failure Resilience  
-**Deciders:** Project maintainer
+**Status:** Accepted
+**Date:** 2026-10-26
+**Context:** Phase 08 — Concurrency & Failure Resilience
 
 ---
 
@@ -34,10 +33,10 @@ This ADR formalizes the architectural decisions, operational tradeoffs, and test
 
 There is no single correct default failure policy for all distributed systems. The choice depends entirely on which failure mode is more catastrophic for the specific business context:
 
-| Policy                      | Behavior during Storage Outage                                     | Primary Beneficiary                                        | Primary Risk                                                                                     | Recommended Context                                                                                       |
-| :-------------------------- | :----------------------------------------------------------------- | :--------------------------------------------------------- | :----------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------- |
-| **`FAIL_CLOSED`** (Default) | Returns `HTTP 503 Service Unavailable`. Drops traffic at the edge. | Downstream Databases, Core Microservices, Third-party APIs | Converts rate limiter outage into an application-wide denial of service for legitimate users.    | Capacity-constrained downstream systems, expensive transactional operations, or anti-scraping boundaries. |
-| **`FAIL_OPEN`**             | Invokes `next()`. Appends `X-RateLimit-Fallback: fail-open`.       | End Users, Client Applications                             | Completely removes traffic protection; allows traffic spikes to cascade into downstream crashes. | High-volume read-heavy APIs where downstream systems possess independent autoscaling or circuit breakers. |
+| Policy                      | Behavior during Storage Outage                                    | Primary Beneficiary                                        | Primary Risk                                                                                     | Recommended Context                                                                                       |
+| :-------------------------- | :---------------------------------------------------------------- | :--------------------------------------------------------- | :----------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------- |
+| **`FAIL_CLOSED`** (Default) | Returns`HTTP 503 Service Unavailable`. Drops traffic at the edge. | Downstream Databases, Core Microservices, Third-party APIs | Converts rate limiter outage into an application-wide denial of service for legitimate users.    | Capacity-constrained downstream systems, expensive transactional operations, or anti-scraping boundaries. |
+| **`FAIL_OPEN`**             | Invokes`next()`. Appends `X-RateLimit-Fallback: fail-open`.       | End Users, Client Applications                             | Completely removes traffic protection; allows traffic spikes to cascade into downstream crashes. | High-volume read-heavy APIs where downstream systems possess independent autoscaling or circuit breakers. |
 
 #### Decision: Default to Fail-Closed
 
@@ -55,7 +54,9 @@ A common pattern attempted in rate limiting architectures is a _hybrid fallback_
 
 If an application cluster has $N$ instances (e.g. $N = 50$ pods behind an ALB), and each node grants a local fallback allowance of $L_{\text{local}} = 10$, the total permitted throughput admitted to downstream services during an outage becomes:
 
-$$\text{Admitted Traffic} = N \times L_{\text{local}} = 50 \times 10 = 500\text{ req/min}$$
+$$
+\text{Admitted Traffic} = N \times L_{\text{local}} = 50 \times 10 = 500\text{ req/min}
+$$
 
 As the cluster autoscales to handle incoming traffic, $N$ increases, and the admitted load admitted to vulnerable downstream databases **multiplies proportionally**.
 

@@ -1,9 +1,8 @@
 # ADR 0005: Token Bucket Reference Algorithm, Refill Dynamics & Complexity Tradeoffs
 
-**Status:** Accepted  
-**Date:** 2026-10-26  
-**Context:** Phase 09 — Token Bucket Reference Implementation  
-**Deciders:** Project maintainer
+**Status:** Accepted
+**Date:** 2026-10-26
+**Context:** Phase 09 — Token Bucket Reference Implementation
 
 ---
 
@@ -44,16 +43,25 @@ export interface TokenBucketPolicy {
 
 1. **Continuous Accrual:**
    Refill is evaluated lazily upon request arrival rather than via active background timers:
-   $$\Delta t = \max(0, t_{\text{now}} - t_{\text{last}})$$
-   $$\Delta \text{tokens} = \Delta t \times \left(\frac{r}{I}\right)$$
-   $$\text{tokens}_{\text{new}} = \min(B, \text{tokens}_{\text{current}} + \Delta \text{tokens})$$
 
-2. **Fractional Token Retention:**
+   $$
+   \Delta t = \max(0, t_{\text{now}} - t_{\text{last}})
+   $$
+
+   $$
+   \Delta \text{tokens} = \Delta t \times \left(\frac{r}{I}\right)
+   $$
+
+   $$
+   \text{tokens}_{\text{new}} = \min(B, \text{tokens}_{\text{current}} + \Delta \text{tokens})
+   $$
+
+2. **Fractional Token Retention & Elimination of Polling Drift:**
    Tokens accumulate as 64-bit IEEE 754 floating-point values. Intermediate fractional tokens are retained across checks. For instance, with a rate of 1 token per 1,000 ms, ten checks spaced 100 ms apart each accrue 0.1 tokens and collectively yield 1.0 token on the 10th check.
-
-3. **Floating-Point Snapping ($\epsilon = 10^{-9}$):**
-   To guard against binary floating-point summation error (e.g. $10 \times 0.1 = 0.9999999999999999 < 1.0$), values within $\epsilon = 10^{-9}$ of an integer snap to the nearest integer.
-
+   Crucially, when a request is throttled due to insufficient tokens, the stored state (`tokens` and `lastRefillTimeMs`) is **not** overwritten. This preserves the continuous elapsed time $\Delta t$ from the last admitted deduction, completely avoiding truncation losses or rounding drift under tight polling loops (e.g. 1 ms intervals).
+3. **Exact Admission Boundary (No Arbitrary Tolerance Offset):**
+   Admission tests the exact boundary $\text{availableTokens} \ge K$. Using an artificial tolerance offset $\epsilon$ (such as $10^{-9}$) causes premature admission before sufficient refill has accrued (for example, granting a token at $t = 999\,999\,999\,000$ ms on a $1\,000\,000\,000\,000$ ms interval). Instead, exact boundary evaluation guarantees that requests are admitted only when tokens are truly available.
+   Regarding floating-point representations: while JavaScript's multiplication $10 \times 0.1$ evaluates exactly to $1.0$, repeated sequential addition of $0.1$ ($0.1 + 0.1 + \dots$ 10 times) accumulates IEEE 754 representation error ($0.9999999999999999$). By computing token accrual directly from the elapsed duration $\Delta t \times (r / I)$ relative to the last deduction timestamp rather than performing iterative incremental additions, cumulative summation error is prevented by construction.
 4. **Bucket Saturation:**
    During extended idle periods ($\Delta t \gg I$), tokens saturate strictly at $B$ and never overflow. When saturated, $t_{\text{last}}$ advances to prevent unbounded integer growth in $\Delta t$.
 
@@ -62,30 +70,65 @@ export interface TokenBucketPolicy {
 ### 2.3 Admission Invariants & Header Semantics
 
 1. **Admission Condition:**
+
    - If $\text{tokens} \ge K$: **Admitted** (`allowed: true`).
-     $$\text{tokens} = \text{tokens} - K$$
-     $$\text{remaining} = \left\lfloor \frac{\text{tokens}}{\text{costPerRequest}} \right\rfloor$$
+
+     $$
+     \text{tokens} = \text{tokens} - K
+     $$
+
+     $$
+     \text{remaining} = \left\lfloor \frac{\text{tokens}}{\text{costPerRequest}} \right\rfloor
+     $$
+
    - If $\text{tokens} < K$: **Throttled** (`allowed: false`).
      Tokens remain unchanged.
-     $$\text{remaining} = 0$$
 
-2. **Reset Time (`resetTimeMs`):**
+     $$
+     \text{remaining} = 0
+     $$
+
+2. **Semantic Meaning of `limit` vs `remaining` when `costPerRequest > 1`:**
+   - `limit` reflects the total capacity ceiling $B$ in token units (or base requests of unit cost 1).
+   - `remaining` reflects the number of **standard requests** that can still be serviced at the configured `costPerRequest`: $\lfloor \text{tokens} / \text{costPerRequest} \rfloor$. When throttled, `remaining` is strictly `0`.
+   - _HTTP Integration Consideration:_ In standard HTTP rate-limiting headers (`X-RateLimit-Limit` and `X-RateLimit-Remaining`), clients expect `remaining` to represent the number of typical requests they can make before being throttled. If an API route accepts heterogeneous request weights ($K > 1$), emitting $\lfloor \text{tokens} / K \rfloor$ provides an honest estimate of remaining requests for that specific route, rather than raw token units which could mislead clients into assuming more requests are permitted than actually fit in the bucket.
+
+3. **Reset Time (`resetTimeMs`):**
    The timestamp when the bucket will be completely replenished to full capacity:
-   $$\text{deficit} = B - \text{tokens}$$
-   $$\text{resetTimeMs} = t_{\text{now}} + \left\lceil \text{deficit} \times \left(\frac{I}{r}\right) \right\rceil$$
 
-3. **Retry-After (`retryAfterSeconds`):**
+   $$
+   \text{deficit} = B - \text{tokens}
+   $$
+
+   $$
+   \text{resetTimeMs} = t_{\text{now}} + \left\lceil \text{deficit} \times \left(\frac{I}{r}\right) \right\rceil
+   $$
+
+4. **Retry-After (`retryAfterSeconds`):**
    Emitted exclusively when throttled. Represents the whole number of seconds until enough tokens accrue to satisfy requested cost $K$:
-   $$\text{needed} = K - \text{tokens}$$
-   $$\text{waitMs} = \left\lceil \text{needed} \times \left(\frac{I}{r}\right) \right\rceil$$
-   $$\text{retryAfterSeconds} = \max\left(1, \left\lceil \frac{\text{waitMs}}{1000} \right\rceil\right)$$
+
+   $$
+   \text{needed} = K - \text{tokens}
+   $$
+
+   $$
+   \text{waitMs} = \left\lceil \text{needed} \times \left(\frac{I}{r}\right) \right\rceil
+   $$
+
+   $$
+   \text{retryAfterSeconds} = \max\left(1, \left\lceil \frac{\text{waitMs}}{1000} \right\rceil\right)
+   $$
 
 ---
 
 ### 2.4 Clock Regression Handling
 
 If the system clock steps backward ($t_{\text{now}} < t_{\text{last}}$) due to local NTP adjustments, $\Delta t$ is clamped to 0:
-$$\Delta t = \max(0, t_{\text{now}} - t_{\text{last}})$$
+
+$$
+\Delta t = \max(0, t_{\text{now}} - t_{\text{last}})
+$$
+
 Tokens are never deducted as a consequence of clock regressions.
 
 ---
@@ -118,12 +161,21 @@ To enforce Token Bucket rate limiting across a distributed cluster, state must b
    - Single declared key: `KEYS[1] = ratelimit:tokenbucket:{clientId}`.
    - Authoritative time: reads Redis server time via `redis.call('TIME')`.
    - Script performs:
-     $$\Delta t = \max(0, \text{nowMs} - \text{storedLast})$$
-     $$\text{refilled} = \min(B, \text{storedTokens} + \Delta t \times (r / I))$$
+
+     $$
+     \Delta t = \max(0, \text{nowMs} - \text{storedLast})
+     $$
+
+     $$
+     \text{refilled} = \min(B, \text{storedTokens} + \Delta t \times (r / I))
+     $$
+
    - Tests `refilled >= cost`. If allowed, updates `t = refilled - cost` and `last = nowMs`.
 3. **Automatic Expiration (`PEXPIREAT`):**
    - Sets absolute expiration to the timestamp when the bucket will be completely full:
-     $$\text{PEXPIREAT} = \text{nowMs} + \left\lceil (B - \text{tokens}) \times \left(\frac{I}{r}\right) \right\rceil$$
+     $$
+     \text{PEXPIREAT} = \text{nowMs} + \left\lceil (B - \text{tokens}) \times \left(\frac{I}{r}\right) \right\rceil
+     $$
    - Inactive client keys automatically expire in Redis without memory retention leaks.
 4. **Scope Confirmation:**
    Per the Phase 09 specification, this Redis architecture is documented for reference but **explicitly not implemented** in this phase.
