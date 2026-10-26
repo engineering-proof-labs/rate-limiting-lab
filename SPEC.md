@@ -112,11 +112,12 @@ To prevent race conditions under concurrent requests, rate-limit check-and-incre
 
 ### 5.2 Key TTL & Memory Management
 
-- Redis key naming format: `ratelimit:{algorithm}:{clientId}:{windowId}`.
-  Example: `ratelimit:fixed:client_abc:29817205`
-- **TTL Rule:** Keys must be set with an expiration equal to remaining window duration plus a safety buffer $\Delta$:
-  $$\text{TTL}_{\text{seconds}} = \left\lceil \frac{\text{reset\_time}(t) - t}{1000} \right\rceil + 5$$
-  This ensures Redis automatically reclaims memory for inactive clients while preserving state across the entire active window.
+- Redis key naming format: `ratelimit:{algorithm}:{clientId}` (declared as `KEYS[1]` in the Lua script).
+  Example: `ratelimit:fixed:client_abc`
+- **Internal State Representation:** Stored as a Redis Hash with fields `'w'` (current `windowId`) and `'c'` (admitted request counter), strictly adhering to the Redis `EVAL` key declaration contract without dynamic key synthesis.
+- **TTL Rule:** Absolute millisecond expiration is assigned using `PEXPIREAT` set to `reset_time(t)` upon initial key creation and subsequent window transitions:
+  $$\text{PEXPIREAT} = \text{reset\_time}(t)$$
+  Subsequent requests within an active window do not extend or refresh expiration. Inactive client keys are reclaimed by Redis automatically at the window boundary.
 
 ### 5.3 Ephemeral Rate Admission vs Durable Billing Quotas
 

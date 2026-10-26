@@ -9,6 +9,23 @@ const REDIS_PORT = Number(process.env.REDIS_PORT ?? 6379);
 describe('RedisFixedWindowRateLimiter — Integration Test Suite', () => {
   let redis: Redis;
 
+  /**
+   * Guards against running tests too close to a window boundary, ensuring all sequential
+   * requests within a test case evaluate against the same epoch window.
+   */
+  async function ensureWindowSafetyMargin(
+    limiter: RedisFixedWindowRateLimiter,
+    minMarginMs = 500,
+  ): Promise<void> {
+    const timeRes = await redis.time();
+    const nowMs = Math.floor(Number(timeRes[0]) * 1000 + Number(timeRes[1]) / 1000);
+    const windowMs = limiter.policy.windowMs;
+    const remainingInWindow = windowMs - (nowMs % windowMs);
+    if (remainingInWindow < minMarginMs) {
+      await new Promise((resolve) => setTimeout(resolve, remainingInWindow + 20));
+    }
+  }
+
   beforeAll(async () => {
     redis = new Redis({
       host: REDIS_HOST,
@@ -51,6 +68,7 @@ describe('RedisFixedWindowRateLimiter — Integration Test Suite', () => {
         keyPrefix,
       });
       await limiter.reset();
+      await ensureWindowSafetyMargin(limiter, 1000);
     });
 
     afterEach(async () => {
@@ -131,6 +149,7 @@ describe('RedisFixedWindowRateLimiter — Integration Test Suite', () => {
         keyPrefix,
       });
       await limiter.reset();
+      await ensureWindowSafetyMargin(limiter, 1000);
     });
 
     afterEach(async () => {
@@ -176,66 +195,122 @@ describe('RedisFixedWindowRateLimiter — Integration Test Suite', () => {
     });
   });
 
-  describe('Independent Multi-Instance Coordination', () => {
-    const sharedPolicy: RateLimitPolicy = {
+  describe('Independent Redis Clients (Separate TCP Connections)', () => {
+    const multiClientPolicy: RateLimitPolicy = {
       limit: 5,
       windowMs: 60_000,
     };
-    const keyPrefix = 'test:fixed:multi-instance';
-    let instanceA: RedisFixedWindowRateLimiter;
-    let instanceB: RedisFixedWindowRateLimiter;
+    const keyPrefix = 'test:fixed:independent-clients';
+    let clientA: Redis;
+    let clientB: Redis;
+    let limiterA: RedisFixedWindowRateLimiter;
+    let limiterB: RedisFixedWindowRateLimiter;
 
     beforeEach(async () => {
-      instanceA = new RedisFixedWindowRateLimiter({
-        redis,
-        policy: sharedPolicy,
+      clientA = new Redis({
+        host: REDIS_HOST,
+        port: REDIS_PORT,
+        maxRetriesPerRequest: 1,
+        lazyConnect: true,
+        enableOfflineQueue: false,
+      });
+      clientB = new Redis({
+        host: REDIS_HOST,
+        port: REDIS_PORT,
+        maxRetriesPerRequest: 1,
+        lazyConnect: true,
+        enableOfflineQueue: false,
+      });
+
+      await Promise.all([clientA.connect(), clientB.connect()]);
+
+      limiterA = new RedisFixedWindowRateLimiter({
+        redis: clientA,
+        policy: multiClientPolicy,
         keyPrefix,
       });
-      instanceB = new RedisFixedWindowRateLimiter({
-        redis,
-        policy: sharedPolicy,
+      limiterB = new RedisFixedWindowRateLimiter({
+        redis: clientB,
+        policy: multiClientPolicy,
         keyPrefix,
       });
-      await instanceA.reset();
+
+      await limiterA.reset();
+      await ensureWindowSafetyMargin(limiterA, 1000);
     });
 
     afterEach(async () => {
-      await instanceA.reset();
+      try {
+        await limiterA.reset();
+      } finally {
+        await Promise.all([
+          clientA.status === 'ready' ? clientA.quit() : Promise.resolve(),
+          clientB.status === 'ready' ? clientB.quit() : Promise.resolve(),
+        ]);
+      }
     });
 
-    it('coordinates quota consumption across two separate limiter instances', async () => {
-      const clientId = 'client-shared-coord';
+    it('collectively admits exactly 5 and rejects 15 across 20 concurrent requests interleaved over separate Redis connections', async () => {
+      const clientId = 'client-multi-tcp';
 
-      // Instance A consumes 3 requests
-      const resA1 = await instanceA.consume(clientId);
-      expect(resA1.allowed).toBe(true);
-      expect(resA1.remaining).toBe(4);
+      // Launch 20 simultaneous requests: 10 over connection A, 10 over connection B
+      const promises = Array.from({ length: 20 }, (_, idx) =>
+        idx % 2 === 0 ? limiterA.consume(clientId) : limiterB.consume(clientId),
+      );
+      const results = await Promise.all(promises);
 
-      const resA2 = await instanceA.consume(clientId);
-      expect(resA2.allowed).toBe(true);
-      expect(resA2.remaining).toBe(3);
+      const admitted = results.filter((r) => r.allowed);
+      const rejected = results.filter((r) => !r.allowed);
 
-      const resA3 = await instanceA.consume(clientId);
-      expect(resA3.allowed).toBe(true);
-      expect(resA3.remaining).toBe(2);
+      expect(admitted).toHaveLength(5);
+      expect(rejected).toHaveLength(15);
 
-      // Instance B consumes 2 requests
-      const resB1 = await instanceB.consume(clientId);
-      expect(resB1.allowed).toBe(true);
-      expect(resB1.remaining).toBe(1);
+      const remainingCounts = admitted.map((r) => r.remaining).sort((a, b) => b - a);
+      expect(remainingCounts).toEqual([4, 3, 2, 1, 0]);
 
-      const resB2 = await instanceB.consume(clientId);
-      expect(resB2.allowed).toBe(true);
-      expect(resB2.remaining).toBe(0);
+      for (const res of rejected) {
+        expect(res.remaining).toBe(0);
+        expect(res.retryAfterSeconds).toBeDefined();
+      }
 
-      // Both instances now observe quota exhaustion
-      const resA4 = await instanceA.consume(clientId);
-      expect(resA4.allowed).toBe(false);
-      expect(resA4.remaining).toBe(0);
+      // Check final saturated counter via connection A
+      const count = await limiterA.getRawCounter(clientId);
+      expect(count).toBe(6);
+    });
 
-      const resB3 = await instanceB.consume(clientId);
-      expect(resB3.allowed).toBe(false);
-      expect(resB3.remaining).toBe(0);
+    it('coordinates sequential quota exhaustion across independent connections', async () => {
+      const clientId = 'client-multi-seq';
+
+      // Limiter A consumes 3 requests
+      const a1 = await limiterA.consume(clientId);
+      expect(a1.allowed).toBe(true);
+      expect(a1.remaining).toBe(4);
+
+      const a2 = await limiterA.consume(clientId);
+      expect(a2.allowed).toBe(true);
+      expect(a2.remaining).toBe(3);
+
+      const a3 = await limiterA.consume(clientId);
+      expect(a3.allowed).toBe(true);
+      expect(a3.remaining).toBe(2);
+
+      // Limiter B consumes 2 requests
+      const b1 = await limiterB.consume(clientId);
+      expect(b1.allowed).toBe(true);
+      expect(b1.remaining).toBe(1);
+
+      const b2 = await limiterB.consume(clientId);
+      expect(b2.allowed).toBe(true);
+      expect(b2.remaining).toBe(0);
+
+      // Both connections now observe rejection
+      const a4 = await limiterA.consume(clientId);
+      expect(a4.allowed).toBe(false);
+      expect(a4.remaining).toBe(0);
+
+      const b3 = await limiterB.consume(clientId);
+      expect(b3.allowed).toBe(false);
+      expect(b3.remaining).toBe(0);
     });
   });
 
@@ -254,6 +329,7 @@ describe('RedisFixedWindowRateLimiter — Integration Test Suite', () => {
         keyPrefix,
       });
       await limiter.reset();
+      await ensureWindowSafetyMargin(limiter, 400);
     });
 
     afterEach(async () => {
@@ -273,15 +349,17 @@ describe('RedisFixedWindowRateLimiter — Integration Test Suite', () => {
       expect(resExhausted.allowed).toBe(false);
 
       const oldResetTimeMs = resExhausted.resetTimeMs;
-      const oldWindowId = Math.floor(oldResetTimeMs / 1000) - 1;
 
-      // Verify old key exists and has TTL <= 1000 ms
-      const ttlBefore = await limiter.getTTL(clientId, oldWindowId);
+      // Verify key exists and has TTL <= 1000 ms
+      const ttlBefore = await limiter.getTTL(clientId);
       expect(ttlBefore).toBeGreaterThan(0);
       expect(ttlBefore).toBeLessThanOrEqual(1000);
 
-      // Wait for window to expire completely (1,150 ms)
-      await new Promise((resolve) => setTimeout(resolve, 1150));
+      // Wait deterministically for the window boundary to elapse
+      const timeRes = await redis.time();
+      const redisNowMs = Math.floor(Number(timeRes[0]) * 1000 + Number(timeRes[1]) / 1000);
+      const msUntilExpiry = Math.max(20, oldResetTimeMs - redisNowMs + 50);
+      await new Promise((resolve) => setTimeout(resolve, msUntilExpiry));
 
       // First request in the new window
       const resNewWindow = await limiter.consume(clientId);
@@ -291,9 +369,10 @@ describe('RedisFixedWindowRateLimiter — Integration Test Suite', () => {
       expect(resNewWindow.remaining).toBe(4);
       expect(resNewWindow.resetTimeMs).toBeGreaterThan(oldResetTimeMs);
 
-      // Verify old key has expired from Redis
-      const oldKeyCounter = await limiter.getRawCounter(clientId, oldWindowId);
-      expect(oldKeyCounter).toBeNull();
+      // Verify stored state in Redis reflects new window
+      const rawState = await limiter.getRawState(clientId);
+      expect(rawState).not.toBeNull();
+      expect(rawState?.count).toBe(1);
     }, 15000);
   });
 
@@ -312,13 +391,14 @@ describe('RedisFixedWindowRateLimiter — Integration Test Suite', () => {
         keyPrefix,
       });
       await limiter.reset();
+      await ensureWindowSafetyMargin(limiter, 1000);
     });
 
     afterEach(async () => {
       await limiter.reset();
     });
 
-    it('sets TTL aligning with epoch boundary on initial request and does not refresh TTL on subsequent requests', async () => {
+    it('sets PEXPIREAT aligning with epoch boundary on initial request and does not refresh TTL on subsequent requests', async () => {
       const clientId = 'client-ttl-test';
 
       const res1 = await limiter.consume(clientId);
@@ -336,7 +416,7 @@ describe('RedisFixedWindowRateLimiter — Integration Test Suite', () => {
       expect(res2.allowed).toBe(true);
 
       const ttl2 = await limiter.getTTL(clientId);
-      // TTL should have decreased, NOT refreshed back to full window duration
+      // TTL should have decreased, NOT refreshed back to full 60,000 ms
       expect(ttl2).toBeLessThanOrEqual(ttl1 - 100);
     });
   });
@@ -356,6 +436,7 @@ describe('RedisFixedWindowRateLimiter — Integration Test Suite', () => {
         keyPrefix,
       });
       await limiter.reset();
+      await ensureWindowSafetyMargin(limiter, 1000);
     });
 
     afterEach(async () => {
@@ -377,9 +458,95 @@ describe('RedisFixedWindowRateLimiter — Integration Test Suite', () => {
         expect(res.remaining).toBe(0);
       }
 
-      // Assert counter in Redis is capped at 6 (limit + 1), not 20
+      // Assert counter in Redis hash is capped at 6 (limit + 1), not 20
       const counter = await limiter.getRawCounter(clientId);
       expect(counter).toBe(6);
+    });
+  });
+
+  describe('Reset Isolation & Glob Metacharacter Safety', () => {
+    const resetPolicy: RateLimitPolicy = {
+      limit: 5,
+      windowMs: 60_000,
+    };
+    const keyPrefix = 'test:fixed:reset-iso';
+    let limiter: RedisFixedWindowRateLimiter;
+
+    beforeEach(async () => {
+      limiter = new RedisFixedWindowRateLimiter({
+        redis,
+        policy: resetPolicy,
+        keyPrefix,
+      });
+      await limiter.reset();
+      await ensureWindowSafetyMargin(limiter, 1000);
+    });
+
+    afterEach(async () => {
+      await limiter.reset();
+    });
+
+    it('selectively resets exact client key containing asterisk (*) without wiping sibling keys', async () => {
+      const globKey = 'client*';
+      const siblingKey = 'client1';
+
+      await limiter.consume(globKey);
+      await limiter.consume(siblingKey);
+
+      expect(await limiter.getRawCounter(globKey)).toBe(1);
+      expect(await limiter.getRawCounter(siblingKey)).toBe(1);
+
+      // Selectively reset client*
+      await limiter.reset(globKey);
+
+      // Exactly client* is reset; siblingKey is unaffected
+      expect(await limiter.getRawCounter(globKey)).toBeNull();
+      expect(await limiter.getRawCounter(siblingKey)).toBe(1);
+    });
+
+    it('selectively resets exact client key containing question mark (?) without wiping sibling keys', async () => {
+      const globKey = 'user?';
+      const siblingKey = 'userA';
+
+      await limiter.consume(globKey);
+      await limiter.consume(siblingKey);
+
+      expect(await limiter.getRawCounter(globKey)).toBe(1);
+      expect(await limiter.getRawCounter(siblingKey)).toBe(1);
+
+      await limiter.reset(globKey);
+
+      expect(await limiter.getRawCounter(globKey)).toBeNull();
+      expect(await limiter.getRawCounter(siblingKey)).toBe(1);
+    });
+
+    it('selectively resets exact client key containing brackets ([]) without wiping matching characters', async () => {
+      const globKey = 'item[1-9]';
+      const siblingKey = 'item1';
+
+      await limiter.consume(globKey);
+      await limiter.consume(siblingKey);
+
+      expect(await limiter.getRawCounter(globKey)).toBe(1);
+      expect(await limiter.getRawCounter(siblingKey)).toBe(1);
+
+      await limiter.reset(globKey);
+
+      expect(await limiter.getRawCounter(globKey)).toBeNull();
+      expect(await limiter.getRawCounter(siblingKey)).toBe(1);
+    });
+
+    it('clears all keys under the configured prefix on blanket reset()', async () => {
+      const client1 = 'client-all-1';
+      const client2 = 'client-all-2';
+
+      await limiter.consume(client1);
+      await limiter.consume(client2);
+
+      await limiter.reset();
+
+      expect(await limiter.getRawCounter(client1)).toBeNull();
+      expect(await limiter.getRawCounter(client2)).toBeNull();
     });
   });
 
@@ -387,7 +554,7 @@ describe('RedisFixedWindowRateLimiter — Integration Test Suite', () => {
     it('throws a connection error when Redis is unreachable and never masks outage as quota exceeded', async () => {
       const unreachableRedis = new Redis({
         host: '127.0.0.1',
-        port: 6399, // Dead port
+        port: 6399, // Unreachable port
         maxRetriesPerRequest: 0,
         lazyConnect: true,
         enableOfflineQueue: false,
@@ -480,58 +647,6 @@ describe('RedisFixedWindowRateLimiter — Integration Test Suite', () => {
       await expect(limiter.consume('   ')).rejects.toThrow(
         'Rate limit key must be a non-empty string',
       );
-    });
-  });
-
-  describe('Limiter Reset Semantics', () => {
-    const resetPolicy: RateLimitPolicy = {
-      limit: 5,
-      windowMs: 60_000,
-    };
-    const keyPrefix = 'test:fixed:reset';
-    let limiter: RedisFixedWindowRateLimiter;
-
-    beforeEach(async () => {
-      limiter = new RedisFixedWindowRateLimiter({
-        redis,
-        policy: resetPolicy,
-        keyPrefix,
-      });
-      await limiter.reset();
-    });
-
-    afterEach(async () => {
-      await limiter.reset();
-    });
-
-    it('selectively resets a single client key without wiping sibling keys', async () => {
-      const client1 = 'client-reset-1';
-      const client2 = 'client-reset-2';
-
-      await limiter.consume(client1);
-      await limiter.consume(client2);
-
-      expect(await limiter.getRawCounter(client1)).toBe(1);
-      expect(await limiter.getRawCounter(client2)).toBe(1);
-
-      // Selectively reset client1
-      await limiter.reset(client1);
-
-      expect(await limiter.getRawCounter(client1)).toBeNull();
-      expect(await limiter.getRawCounter(client2)).toBe(1);
-    });
-
-    it('clears all keys under the configured prefix on blanket reset()', async () => {
-      const client1 = 'client-all-1';
-      const client2 = 'client-all-2';
-
-      await limiter.consume(client1);
-      await limiter.consume(client2);
-
-      await limiter.reset();
-
-      expect(await limiter.getRawCounter(client1)).toBeNull();
-      expect(await limiter.getRawCounter(client2)).toBeNull();
     });
   });
 });
