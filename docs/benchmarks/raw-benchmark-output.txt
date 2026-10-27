@@ -1,0 +1,68 @@
+========================================================================================
+RATE LIMITING LABORATORY — REPRODUCIBLE BENCHMARK HARNESS
+Phase 12 Audit Reconciliation & Grounded Performance Evidence
+========================================================================================
+
+--- 1. Captured Hardware & Runtime Environment ---
+Timestamp (UTC):  2026-10-26T22:59:50.595Z
+Node.js Version:  v22.18.0
+Redis Version:    7.4.12
+Operating System: Microsoft Windows 11 Pro (Release 10.0.26300, x64)
+CPU Hardware:     AMD Ryzen 7 5700U with Radeon Graphics (16 logical cores)
+System Memory:    15.35 GB total RAM
+
+--- 2. In-Memory Algorithm Benchmark Suites (3 Repetitions per Workload) ---
+Evaluating algorithms across 3 distinct, semantically controlled workloads:
+  Workload 1: Fresh-Client Admission-Heavy (50,000 unique keys, 100% admission, cold state)
+  Workload 2: Saturated Quotas Rejection-Heavy (100 keys, limit 10, ~98% rejection, fast-path)
+  Workload 3: Mixed Steady-State Traffic (5,000 keys, limit 5, exactly 50% admission / 50% rejection)
+
+>>> Workload 1: Fresh Clients (100% Admission / 50,000 Operations) <<<
+  [Fixed Window Counter   ] Mean:   649,983 ops/s | Range: [530,041 - 820,420] | Adm/Rej: 50000/0 | p50:  1.00 µs | p95:  2.20 µs | p99:  3.50 µs
+  [Token Bucket           ] Mean:   800,539 ops/s | Range: [533,296 - 977,792] | Adm/Rej: 50000/0 | p50:  0.70 µs | p95:  1.30 µs | p99:  2.00 µs
+  [Sliding Window Log     ] Mean:   594,947 ops/s | Range: [459,461 - 702,146] | Adm/Rej: 50000/0 | p50:  0.80 µs | p95:  1.30 µs | p99:  1.80 µs
+  [Sliding Window Counter ] Mean:   802,603 ops/s | Range: [587,897 - 1,050,334] | Adm/Rej: 50000/0 | p50:  0.90 µs | p95:  1.70 µs | p99:  2.30 µs
+
+>>> Workload 2: Saturated Quotas (~98% Rejection / 50,000 Operations) <<<
+  [Fixed Window Counter   ] Mean: 1,326,298 ops/s | Range: [1,163,597 - 1,445,998] | Adm/Rej: 1000/49000 | p50:  0.60 µs | p95:  0.70 µs | p99:  0.90 µs
+  [Token Bucket           ] Mean: 1,827,101 ops/s | Range: [1,676,924 - 1,960,661] | Adm/Rej: 1000/49000 | p50:  0.40 µs | p95:  0.50 µs | p99:  0.60 µs
+  [Sliding Window Log     ] Mean: 1,077,665 ops/s | Range: [1,024,286 - 1,126,464] | Adm/Rej: 1000/49000 | p50:  0.80 µs | p95:  0.90 µs | p99:  1.10 µs
+  [Sliding Window Counter ] Mean: 1,999,177 ops/s | Range: [1,925,818 - 2,129,408] | Adm/Rej: 1000/49000 | p50:  0.40 µs | p95:  0.50 µs | p99:  0.70 µs
+
+>>> Workload 3: Mixed Traffic (50% Admission / 50,000 Operations) <<<
+  [Fixed Window Counter   ] Mean: 1,373,786 ops/s | Range: [1,335,720 - 1,425,001] | Adm/Rej: 25000/25000 | p50:  0.50 µs | p95:  0.80 µs | p99:  1.30 µs
+  [Token Bucket           ] Mean: 1,765,058 ops/s | Range: [1,711,309 - 1,843,821] | Adm/Rej: 25000/25000 | p50:  0.40 µs | p95:  0.70 µs | p99:  1.10 µs
+  [Sliding Window Log     ] Mean: 1,250,783 ops/s | Range: [1,220,402 - 1,267,925] | Adm/Rej: 25000/25000 | p50:  0.60 µs | p95:  0.80 µs | p99:  1.30 µs
+  [Sliding Window Counter ] Mean: 1,707,974 ops/s | Range: [1,580,798 - 1,802,770] | Adm/Rej: 25000/25000 | p50:  0.40 µs | p95:  0.70 µs | p99:  1.10 µs
+
+--- 3. Distributed Express HTTP + Redis Benchmark (2,000 Requests / Concurrency 20) ---
+Configuration: 50 client keys, limit 5 per key -> Exactly 250 admitted, 1,750 throttled.
+Executing closed-loop batch concurrency over local TCP loopback...
+
+  Architecture:       Express HTTP + Redis Lua State Machine
+  Total Requests:     2000
+  Concurrency Level:  20 parallel requests per batch
+  Total Duration:     5249.00 ms
+  Throughput:         381 req/sec
+  Status Breakdown:   Admitted (HTTP 200): 250 | Throttled (HTTP 429): 1750 | Unexpected: 0
+  Sum Check:          250 + 1750 + 0 = 2000 (Integrity Verified)
+
+  Latency Distribution (End-to-End Supertest HTTP + Redis):
+    Overall:          p50: 44.94 ms | p95: 85.42 ms | p99: 116.74 ms | Mean: 49.59 ms
+    Admitted (200):   p50: 50.73 ms | p95: 66.31 ms | p99: 67.55 ms | Mean: 50.72 ms
+    Throttled (429):  p50: 43.99 ms | p95: 86.94 ms | p99: 117.30 ms | Mean: 49.42 ms
+
+--- 4. Methodology & Measurement Limitations ---
+1. Closed-Loop Supertest Overhead:
+   This HTTP benchmark measures a closed-loop client using Supertest / Node HTTP agent without persistent
+   HTTP keep-alive socket pooling. Each request performs ephemeral socket establishment, JSON serialization,
+   Express middleware dispatch, ioredis command transmission, Redis Lua evaluation, and response header parsing.
+   Consequently, the ~100 req/sec result reflects local unpipelined closed-loop request-response latency,
+   NOT the saturation limit of Redis (which can process 80k-100k+ ops/sec via pipelining) or Express.
+2. Co-located Resource Contention:
+   Node.js (test runner + Express app) and Redis share the same physical CPU cores and loopback network adapter.
+3. Workload Invariance:
+   In-memory benchmarks isolate pure V8 execution time across distinct admission/rejection regimes.
+   Algorithm ranking varies depending on whether map allocation (fresh clients) or math checks (saturated)
+   dominate the execution path.
+========================================================================================

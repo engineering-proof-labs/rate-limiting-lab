@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify Correctness
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Node.js LTS
+        uses: actions/setup-node@1e60f620b724f14d2a4421a2cb9725b263276807 # v4.2.0
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run verification pipeline
+        env:
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: 6379
+        run: npm run verify
