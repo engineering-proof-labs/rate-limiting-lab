@@ -207,7 +207,10 @@ describe('Phase 10 — Sliding Window In-Memory Reference Algorithms', () => {
       const res6 = limiter.consume(clientId);
       expect(res6.allowed).toBe(false);
       expect(res6.remaining).toBe(0);
-      expect(res6.retryAfterSeconds).toBe(1);
+      // At t = 0, earliest admissible time in next window is t = 1001 ms (waitMs = 1001 ms -> ceil(1001 / 1000) = 2 s).
+      // Waiting 1 s would retry at t = 1000 ms where previousWeight = 1.0 and estimatedCount = 5.0 >= 5 (throttled).
+      expect(res6.resetTimeMs).toBe(1001);
+      expect(res6.retryAfterSeconds).toBe(2);
     });
 
     it('calculates weighted estimate across adjacent windows based on elapsed fraction', () => {
@@ -288,6 +291,112 @@ describe('Phase 10 — Sliding Window In-Memory Reference Algorithms', () => {
       const resNext = limiter.consume(clientId);
       expect(resNext.allowed).toBe(true);
       expect(resNext.remaining).toBe(0);
+    });
+
+    it('calculates accurate Retry-After and resetTimeMs when current window is fully exhausted at t = 0 (next epoch transition defect)', () => {
+      const longPolicy: RateLimitPolicy = {
+        limit: 5,
+        windowMs: 60_000,
+      };
+      const limiter = new InMemorySlidingWindowCounterRateLimiter(longPolicy, clock);
+      const clientId = 'client-exhausted-t0';
+
+      // t = 0: admit 5 requests in Window 0 (exhausting currentCount = 5)
+      for (let i = 0; i < 5; i++) {
+        expect(limiter.consume(clientId).allowed).toBe(true);
+      }
+
+      // Immediately send request 6 at t = 0
+      const resThrottled = limiter.consume(clientId);
+      expect(resThrottled.allowed).toBe(false);
+
+      // Defect verification:
+      // At t = 60,000, former currentCount (5) becomes previousCount with weight 1.0 (estimatedCount = 5.0 >= 5).
+      // Request is STILL REJECTED at t = 60,000! It is only admitted at t = 60,001 (estimatedCount = 4.9999 < 5).
+      // Instructing the client to retry after 60 seconds (at t = 60,000) causes premature retry rejection.
+      // Therefore, resetTimeMs must be 60,001 ms, and retryAfterSeconds must be 61 seconds.
+      expect(resThrottled.resetTimeMs).toBe(60_001);
+      expect(resThrottled.retryAfterSeconds).toBe(61);
+
+      // Verify exact next epoch boundary: at t = 60,000 ms, request MUST STILL be rejected!
+      clock.setTime(60_000);
+      const resAtBoundary = limiter.consume(clientId);
+      expect(resAtBoundary.allowed).toBe(false);
+      expect(resAtBoundary.resetTimeMs).toBe(60_001);
+      expect(resAtBoundary.retryAfterSeconds).toBe(1);
+
+      // Verify 1 ms after boundary: at t = 60,001 ms, request is admitted!
+      clock.setTime(60_001);
+      const resAfterBoundary = limiter.consume(clientId);
+      expect(resAfterBoundary.allowed).toBe(true);
+      expect(resAfterBoundary.remaining).toBe(0);
+    });
+
+    it('verifies repeated denials, millisecond-to-second rounding, and nonzero previousCount under Sliding Window Counter', () => {
+      const longPolicy: RateLimitPolicy = {
+        limit: 5,
+        windowMs: 60_000,
+      };
+      const limiter = new InMemorySlidingWindowCounterRateLimiter(longPolicy, clock);
+      const clientId = 'client-repeated-denials';
+
+      // Window 0: exhaust quota at t = 0
+      for (let i = 0; i < 5; i++) {
+        limiter.consume(clientId);
+      }
+
+      // Millisecond-to-second rounding assertions across repeated denials:
+      // Earliest admission is at t = 60,001 ms:
+      // At t = 0: waitMs = 60,001 -> ceil(60,001 / 1000) = 61 s
+      clock.setTime(0);
+      expect(limiter.consume(clientId).retryAfterSeconds).toBe(61);
+
+      // At t = 1: waitMs = 60,000 -> ceil(60,000 / 1000) = 60 s
+      clock.setTime(1);
+      expect(limiter.consume(clientId).retryAfterSeconds).toBe(60);
+
+      // At t = 1,000: waitMs = 59,001 -> ceil(59,001 / 1000) = 60 s
+      clock.setTime(1_000);
+      expect(limiter.consume(clientId).retryAfterSeconds).toBe(60);
+
+      // At t = 1,001: waitMs = 59,000 -> ceil(59,000 / 1000) = 59 s
+      clock.setTime(1_001);
+      expect(limiter.consume(clientId).retryAfterSeconds).toBe(59);
+
+      // At t = 30,000: waitMs = 30,001 -> ceil(30,001 / 1000) = 31 s
+      clock.setTime(30_000);
+      expect(limiter.consume(clientId).retryAfterSeconds).toBe(31);
+
+      // At t = 59,001: waitMs = 1,000 -> ceil(1,000 / 1000) = 1 s
+      clock.setTime(59_001);
+      expect(limiter.consume(clientId).retryAfterSeconds).toBe(1);
+
+      // At t = 59,999: waitMs = 2 -> ceil(2 / 1000) = 1 s
+      clock.setTime(59_999);
+      expect(limiter.consume(clientId).retryAfterSeconds).toBe(1);
+
+      // Nonzero previousCount scenario in the following window:
+      // At t = 60,001 ms: 1 request admitted (currentCount becomes 1, previousCount was 5)
+      clock.setTime(60_001);
+      expect(limiter.consume(clientId).allowed).toBe(true);
+
+      // At t = 60,001 ms: estimatedCount = 5 * (59,999 / 60,000) + 1 = 4.9999 + 1 = 5.9999 >= 5
+      // Throttled! previousCount = 5, currentCount = 1.
+      // Deficit = 5 - 1 = 4.
+      // thresholdElapsed = 60,000 * (1 - 4/5) = 12,000 ms.
+      // earliestAdmissible = 60,000 + 12,001 = 72,001 ms.
+      const resNonzeroPrev = limiter.consume(clientId);
+      expect(resNonzeroPrev.allowed).toBe(false);
+      expect(resNonzeroPrev.resetTimeMs).toBe(72_001);
+      expect(resNonzeroPrev.retryAfterSeconds).toBe(Math.ceil((72_001 - 60_001) / 1000)); // 12 seconds
+
+      // At t = 72,000 ms: estimatedCount = 5 * (48,000 / 60,000) + 1 = 5 * 0.8 + 1 = 5.0 >= 5 (still throttled)
+      clock.setTime(72_000);
+      expect(limiter.consume(clientId).allowed).toBe(false);
+
+      // At t = 72,001 ms: estimatedCount = 5 * (47,999 / 60,000) + 1 = 4.999916 < 5 (admitted!)
+      clock.setTime(72_001);
+      expect(limiter.consume(clientId).allowed).toBe(true);
     });
 
     it('documents deliberate approximation: admits when estimatedCount < limit even if increment exceeds limit', () => {

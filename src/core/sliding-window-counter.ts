@@ -23,7 +23,13 @@ interface ClientCounterState {
  *   overestimate rolling usage.
  * - Memory efficiency: Requires only O(1) storage per client (two integer counters and a window ID),
  *   avoiding the unbounded memory growth of timestamp logs under high traffic.
- * - Reset time: Aligned to the end of the current fixed window: (currentWindowId + 1) * windowMs.
+ * - Reset time semantics:
+ *   - On admitted requests (`allowed: true`): resetTimeMs aligns to the end of the current accounting window:
+ *     (currentWindowId + 1) * windowMs.
+ *   - On throttled requests (`allowed: false`): resetTimeMs indicates the exact earliest admissible integer
+ *     millisecond derived from the continuous decay equation (earliestAdmissibleTimeMs). This guarantees that
+ *     retryAfterSeconds (ceil((earliestAdmissibleTimeMs - nowMs) / 1000)) never instructs a client to retry
+ *     before the algorithm would actually admit a request.
  */
 export class InMemorySlidingWindowCounterRateLimiter {
   public readonly policy: Readonly<RateLimitPolicy>;
@@ -102,19 +108,42 @@ export class InMemorySlidingWindowCounterRateLimiter {
     let earliestAdmissibleTimeMs: number;
 
     if (state.currentCount >= this.policy.limit) {
-      // Current window already exhausted quota on its own; cannot open during this window
-      earliestAdmissibleTimeMs = resetTimeMs;
+      // Current window already exhausted quota on its own; cannot open during this window.
+      // At the next epoch boundary (nextWindowStart = (windowId + 1) * windowMs = resetTimeMs),
+      // currentCount transitions to previousCount with weight 1.0 (estimatedCount = currentCount * 1.0 >= limit).
+      // Therefore, the request remains throttled at the exact boundary and only becomes admissible
+      // after previousCount begins decaying in the following window:
+      // nextPreviousCount * (1 - delta_t / windowMs) < limit
+      // delta_t > windowMs * (1 - limit / nextPreviousCount)
+      const nextPreviousCount = state.currentCount;
+      // Operation ordering: multiply before dividing to preserve exact integer ratios
+      // (e.g. (W * (P - L)) / P rather than W * (1 - L / P) which suffers from IEEE 754 float subtraction error)
+      const thresholdElapsed =
+        (this.policy.windowMs * (nextPreviousCount - this.policy.limit)) / nextPreviousCount;
+      const admissibleElapsed = Math.floor(thresholdElapsed) + 1;
+
+      if (admissibleElapsed >= this.policy.windowMs) {
+        // If nextPreviousCount is >= 2 * limit, decay throughout the entire next window is insufficient;
+        // rolls over to subsequent window boundary
+        earliestAdmissibleTimeMs = resetTimeMs + this.policy.windowMs;
+      } else {
+        earliestAdmissibleTimeMs = resetTimeMs + admissibleElapsed;
+      }
     } else {
       // previousCount > 0 must hold since currentCount < limit and estimatedCount >= limit
-      // Solve for t_elapsed:
+      // Solve for t_elapsed in the current window:
       // (windowMs - t_elapsed) / windowMs < (limit - currentCount) / previousCount
       // t_elapsed > windowMs * (1 - (limit - currentCount) / previousCount)
       const deficit = this.policy.limit - state.currentCount;
-      const thresholdElapsed = this.policy.windowMs * (1 - deficit / state.previousCount);
+      // Operation ordering: (W * (previousCount - deficit)) / previousCount
+      const thresholdElapsed =
+        (this.policy.windowMs * (state.previousCount - deficit)) / state.previousCount;
       // Discrete millisecond time: earliest admissible integer millisecond is floor(thresholdElapsed) + 1
       const admissibleElapsed = Math.floor(thresholdElapsed) + 1;
 
       if (admissibleElapsed >= this.policy.windowMs) {
+        // If decay within the current window cannot reach threshold, admission occurs at nextWindowStart
+        // where nextCurrentCount = 0 and nextPreviousCount = currentCount < limit
         earliestAdmissibleTimeMs = resetTimeMs;
       } else {
         const windowStartMs = windowId * this.policy.windowMs;

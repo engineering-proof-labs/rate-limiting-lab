@@ -355,7 +355,7 @@ describe('HTTP Concurrency & Failure Resilience Test Suite (Phase 08)', () => {
         keyPrefix,
       });
       await limiter.reset();
-      await ensureWindowSafetyMargin(limiter, 400);
+      await ensureWindowSafetyMargin(limiter, 750);
       app = createApp({ limiter, enableDemoHeaders: true });
     });
 
@@ -365,6 +365,7 @@ describe('HTTP Concurrency & Failure Resilience Test Suite (Phase 08)', () => {
 
     it('handles concurrent bursts across window expiration with exact quota reset', async () => {
       const clientId = 'client-burst-rollover';
+      await ensureWindowSafetyMargin(limiter, 750);
 
       // Window 1: 15 concurrent requests
       const burst1 = await Promise.all(
