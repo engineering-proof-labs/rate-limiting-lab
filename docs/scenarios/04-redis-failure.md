@@ -41,7 +41,7 @@ In real-world distributed architectures, backing datastores experience operation
 
 ### Alternative B: Fail-Open Policy (Configurable)
 
-- **Mechanism:** On storage error, the middleware logs a structured warning, appends an optional diagnostic header (`X-RateLimit-Fallback: fail-open`), and delegates control directly to the downstream route handler via `next()`.
+- **Mechanism:** On storage error, when configured with `failurePolicy: 'fail-open'`, the middleware appends the diagnostic header (`X-RateLimit-Fallback: fail-open`) and delegates control directly to the downstream route handler via `next()`. (In production systems, a telemetry or structured logging sink would record the exception; this reference laboratory sets the response header and invokes `next()` without an external logging abstraction).
 - **Tradeoffs:**
   - _Advantages:_ Preserves user-facing availability; legitimate traffic proceeds without interruption.
   - _Disadvantages:_ Completely removes rate limiting; malicious traffic or sudden spikes can cascade into downstream database crashes.
@@ -81,10 +81,10 @@ In real-world distributed architectures, backing datastores experience operation
 
 ## 8. Existing Tests & Verification Paths
 
-- **HTTP Contract Outage Tests:** [`tests/contract/http-contract.test.ts`](file:///c:/Users/bruno/CV%20Manager/engineering-labs/rate-limiting-lab/tests/contract/http-contract.test.ts)
+- **HTTP Contract Outage Tests:** [`tests/contract/http-contract.test.ts`](../../tests/contract/http-contract.test.ts)
   - Test case: `defaults to fail-closed returning HTTP 503 Service Unavailable when failurePolicy is omitted`
   - Test case: `delegates to route handler when configured with fail-open and sets diagnostic header`
-- **Concurrency & Failure Resilience Suite:** [`tests/contract/http-concurrency-resilience.test.ts`](file:///c:/Users/bruno/CV%20Manager/engineering-labs/rate-limiting-lab/tests/contract/http-concurrency-resilience.test.ts)
+- **Concurrency & Failure Resilience Suite:** [`tests/contract/http-concurrency-resilience.test.ts`](../../tests/contract/http-concurrency-resilience.test.ts)
   - Section: `Connection Refusal & Readonly Replica Rejection`
   - Section: `Transient Storage Outage & Self-Healing State Recovery`
 

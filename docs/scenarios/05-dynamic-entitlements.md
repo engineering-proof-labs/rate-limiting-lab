@@ -99,7 +99,7 @@ flowchart LR
 ## 9. Existing Tests & Verification Paths
 
 - In accordance with the Phase 11 specification, billing service implementation is explicitly excluded from this laboratory.
-- Policy validation tests: [`tests/unit/fixed-window.test.ts`](file:///c:/Users/bruno/CV%20Manager/engineering-labs/rate-limiting-lab/tests/unit/fixed-window.test.ts), [`tests/unit/token-bucket.test.ts`](file:///c:/Users/bruno/CV%20Manager/engineering-labs/rate-limiting-lab/tests/unit/token-bucket.test.ts)
+- Policy validation tests: [`tests/unit/fixed-window.test.ts`](../../tests/unit/fixed-window.test.ts), [`tests/unit/token-bucket.test.ts`](../../tests/unit/token-bucket.test.ts)
 
 ---
 

@@ -57,7 +57,7 @@ Under high concurrency (e.g. flash crowds, distributed DDoS, or microservices ma
 
 **Selected: Alternative B (Atomic Lua Scripting).**
 
-The Lua script performs only $O(1)$ hash field updates (`HGET`, `HSET`, `PEXPIREAT`), executing in $< 50\mu\text{s}$ per invocation. It eliminates TOCTOU races in a single round-trip without transaction contention.
+The Lua script performs only $O(1)$ hash field updates (`HGET`, `HSET`, `PEXPIREAT`), executing in a bounded single-threaded step without client-side transaction retries. It eliminates TOCTOU races in a single network round-trip without multi-round-trip lock contention.
 
 ---
 
@@ -77,9 +77,9 @@ The Lua script performs only $O(1)$ hash field updates (`HGET`, `HSET`, `PEXPIRE
 
 ## 8. Existing Tests & Verification Paths
 
-- **Redis Integration Suite:** [`tests/integration/redis-fixed-window.test.ts`](file:///c:/Users/bruno/CV%20Manager/engineering-labs/rate-limiting-lab/tests/integration/redis-fixed-window.test.ts)
+- **Redis Integration Suite:** [`tests/integration/redis-fixed-window.test.ts`](../../tests/integration/redis-fixed-window.test.ts)
   - Test case: `strictly admits exactly 5 and rejects 15 under 20 concurrent requests with Promise.all`
-- **HTTP Concurrency Suite:** [`tests/contract/http-concurrency-resilience.test.ts`](file:///c:/Users/bruno/CV%20Manager/engineering-labs/rate-limiting-lab/tests/contract/http-concurrency-resilience.test.ts)
+- **HTTP Concurrency Suite:** [`tests/contract/http-concurrency-resilience.test.ts`](../../tests/contract/http-concurrency-resilience.test.ts)
   - Test case: `strictly admits exactly 5 and throttles 15 across 20 concurrent HTTP requests against shared Redis quota`
 
 ---

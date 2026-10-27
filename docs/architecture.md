@@ -1,7 +1,7 @@
 # Architecture & Module Design — Rate Limiting Laboratory
 
-**Document Version:** 1.1.0  
-**Phase:** 03.1 — Architectural Design Refinement  
+**Document Version:** 1.2.0  
+**Phase:** 12 — Benchmarks, Mutations & Architectural Realignment  
 **Repository:** `engineering-proof-labs/rate-limiting-lab`
 
 ---
@@ -11,7 +11,7 @@
 This laboratory adheres to **focused modularity without architectural ceremony**:
 
 1. **Core Domain Independence:** Pure rate-limiting algorithms contain zero framework dependencies (no Express, no Redis, no network).
-2. **Minimal & Direct Abstractions:** No artificial micro-files or single-method wrapper classes. Functions and modules directly fulfill testable requirements.
+2. **Minimal & Direct Abstractions:** No artificial micro-files or speculative wrapper classes. Rate limiters implement a unified `consume(key)` contract.
 3. **Pluggable Time for Unit Tests vs Redis Time Authority:**
    - In-memory limiters accept an explicit `Clock` interface (`VirtualClock`) for sub-millisecond, deterministic tests.
    - The distributed Redis storage uses **Redis server time** (`redis.call('TIME')`) as the single authoritative clock to prevent multi-instance clock drift.
@@ -22,23 +22,24 @@ This laboratory adheres to **focused modularity without architectural ceremony**
 
 ```
 src/
-├── core/                       # Pure domain engine & types (zero dependencies)
+├── core/                       # Pure domain algorithms & types (zero dependencies)
 │   ├── types.ts                # RateLimitResult, RateLimitPolicy, TokenBucketPolicy, Clock
 │   ├── clock.ts                # SystemClock, VirtualClock
 │   ├── fixed-window.ts         # Fixed Window Counter reference implementation
-│   └── token-bucket.ts         # Token Bucket reference implementation
+│   ├── token-bucket.ts         # Token Bucket reference implementation
+│   ├── sliding-window-log.ts   # Sliding Window Log reference implementation
+│   └── sliding-window-counter.ts # Sliding Window Counter reference implementation
 │
-├── storage/                    # Storage backends
-│   ├── storage.interface.ts    # RateLimiterStorage interface
-│   ├── memory-storage.ts       # In-memory map storage (deterministic unit testing)
-│   └── redis-storage.ts        # Atomic Redis backend (anchored to Redis time)
+├── storage/                    # Distributed state & persistence
+│   └── redis-fixed-window.ts   # Atomic Redis Fixed Window rate limiter (anchored to Redis time)
 │
 ├── middleware/                 # Express HTTP adapter
-│   └── rate-limit.ts           # Middleware factory (includes header & error handling)
+│   └── rate-limit.ts           # Middleware factory, key generators, header formatting, failure policies
 │
-└── app/                        # Express application assembly
-    ├── routes.ts               # Route handlers (/health, /api/v1/limited, /api/v1/unlimited)
-    └── server.ts               # App factory and server listener
+├── app/                        # Express application assembly
+│   └── create-app.ts           # Application factory (/health, /api/v1/limited, /api/v1/unlimited)
+│
+└── index.ts                    # Laboratory entrypoint & public exports
 ```
 
 ---
@@ -48,20 +49,31 @@ src/
 ```mermaid
 flowchart TD
     subgraph HTTP Layer [Express Framework & Routes]
-        App[app/server.ts\nExpress Application] --> Router[app/routes.ts\nRoute Handlers]
-        Router --> Middleware[middleware/rate-limit.ts\nRate Limit Middleware]
+        App[app/create-app.ts\nExpress App Factory] --> Middleware[middleware/rate-limit.ts\nRate Limit Middleware]
     end
 
-    subgraph Storage Layer [Persistence & Concurrency]
-        Middleware --> StorageInterface[storage/storage.interface.ts\nRateLimiterStorage]
-        StorageInterface --> MemoryStorage[storage/memory-storage.ts\nIn-Memory Storage]
-        StorageInterface --> RedisStorage[storage/redis-storage.ts\nAtomic Redis Store]
+    subgraph Rate Limiter Contract [Admission & Concurrency Interface]
+        Middleware --> RateLimiterInterface[middleware/rate-limit.ts\nRateLimiter: consume]
     end
 
-    subgraph Core Layer [Pure Domain - Zero Dependencies]
-        StorageInterface --> CoreTypes[core/types.ts\nRateLimitResult, Policy]
-        MemoryStorage --> Clock[core/clock.ts\nClock Interface]
-        FixedWindowCore[core/fixed-window.ts\nFixed Window Math] --> CoreTypes
+    subgraph Implementations [Distributed & In-Memory Engines]
+        RateLimiterInterface --> RedisLimiter[storage/redis-fixed-window.ts\nRedisFixedWindowRateLimiter]
+        RateLimiterInterface --> InMemoryFixed[core/fixed-window.ts\nInMemoryFixedWindowRateLimiter]
+        RateLimiterInterface --> InMemoryTB[core/token-bucket.ts\nInMemoryTokenBucketRateLimiter]
+        RateLimiterInterface --> InMemorySWLog[core/sliding-window-log.ts\nInMemorySlidingWindowLogRateLimiter]
+        RateLimiterInterface --> InMemorySWCounter[core/sliding-window-counter.ts\nInMemorySlidingWindowCounterRateLimiter]
+    end
+
+    subgraph Core Domain [Pure Domain - Zero Dependencies]
+        RedisLimiter --> CoreTypes[core/types.ts\nRateLimitResult, RateLimitPolicy]
+        InMemoryFixed --> CoreTypes
+        InMemoryFixed --> Clock[core/clock.ts\nClock Interface]
+        InMemoryTB --> CoreTypes
+        InMemoryTB --> Clock
+        InMemorySWLog --> CoreTypes
+        InMemorySWLog --> Clock
+        InMemorySWCounter --> CoreTypes
+        InMemorySWCounter --> Clock
     end
 ```
 
@@ -70,61 +82,76 @@ flowchart TD
 - **`types.ts`:**
   ```typescript
   export interface RateLimitPolicy {
-    readonly limit: number; // Total allowed requests per window (e.g. 5)
-    readonly windowMs: number; // Window duration in milliseconds (e.g. 60000)
-    readonly failurePolicy: 'fail-closed' | 'fail-open';
+    readonly limit: number; // Total allowed requests per window
+    readonly windowMs: number; // Window duration in milliseconds
+  }
+
+  export interface TokenBucketPolicy {
+    readonly capacity: number;
+    readonly refillRate: number;
+    readonly refillIntervalMs: number;
   }
 
   export interface RateLimitResult {
     readonly allowed: boolean; // Admission decision
     readonly limit: number; // Maximum quota for window
     readonly remaining: number; // Remaining quota (>= 0)
-    readonly resetTimeMs: number; // Absolute epoch millisecond of window reset
-    readonly retryAfterSeconds?: number; // Present only on HTTP 429 (quota exhaustion)
+    readonly resetTimeMs: number; // Absolute epoch millisecond of window reset / earliest admission
+    readonly retryAfterSeconds?: number; // Present only on throttled requests
   }
 
   export interface Clock {
     now(): number;
   }
   ```
-- **`clock.ts`:** `SystemClock` (delegates to `Date.now()`) and `VirtualClock` (supports programmatic `advance(ms)` for deterministic unit tests).
-- **`fixed-window.ts`:** Computes window IDs, boundary points, and reset timestamps using pure arithmetic ($k = \lfloor t / W \rfloor$).
+- **`clock.ts`:** `SystemClock` (delegates to `Date.now()`) and `VirtualClock` (supports programmatic `setTime(ms)` and `advance(ms)` for deterministic unit tests).
+- **Domain Implementations:**
+  - `fixed-window.ts`: Pure Fixed Window counter arithmetic ($k = \lfloor t / W \rfloor$).
+  - `token-bucket.ts`: Continuous refill token bucket with exact mathematical integer ordering and safe float-bound accrual.
+  - `sliding-window-log.ts`: Exact sliding window log with memory bounding (rejected requests are not recorded).
+  - `sliding-window-counter.ts`: Sliding window counter with continuous decay earliest-admission derivation.
 
-### 3.2 `storage/` (State & Concurrency)
+### 3.2 `storage/` (Distributed State & Concurrency)
 
-- **`storage.interface.ts`:**
-  ```typescript
-  export interface RateLimiterStorage {
-    incrementAndCheck(
-      key: string,
-      policy: RateLimitPolicy,
-      nowMs?: number, // Used by memory-storage with VirtualClock; Redis uses server time
-    ): Promise<RateLimitResult>;
-
-    reset(key?: string): Promise<void>;
-    close(): Promise<void>;
-  }
-  ```
-- **`memory-storage.ts`:** Stores client counts in an in-memory `Map`. Ideal for sub-millisecond unit tests.
-- **`redis-storage.ts`:** Executes an atomic Lua script in Redis. Calculates window boundaries using **Redis server time** (`redis.call('TIME')`), eliminating clock skew vulnerabilities across application instances.
+- **`redis-fixed-window.ts`:**
+  - Executes an atomic Lua script inside Redis via `EVAL`.
+  - Calculates window boundaries using **Redis server time** (`redis.call('TIME')`), eliminating clock skew vulnerabilities across application instances.
+  - Implements `RateLimiter`:
+    ```typescript
+    export class RedisFixedWindowRateLimiter implements RateLimiter {
+      public readonly policy: Readonly<RateLimitPolicy>;
+      consume(key: string): Promise<RateLimitResult>;
+      reset(key?: string): Promise<void>;
+      close(): Promise<void>;
+    }
+    ```
 
 ### 3.3 `middleware/rate-limit.ts` (HTTP Adapter)
 
-- Resolves client key from `X-Client-Id` or `req.ip`.
-- Calls `storage.incrementAndCheck(key, policy, clock.now())`.
+- Defines the cohesive consumer interface:
+  ```typescript
+  export interface RateLimiter {
+    readonly policy: Readonly<RateLimitPolicy>;
+    consume(key: string): RateLimitResult | Promise<RateLimitResult>;
+  }
+  ```
+- Resolves client key:
+  - `defaultKeyGenerator`: Strictly anchors to IP address (`req.ip ?? req.socket.remoteAddress`).
+  - `demoHeaderKeyGenerator`: Validates sanitized `X-Demo-Client-Id` or `X-Client-Id` for testing fixtures.
 - Sets standard de facto headers (`X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`).
 - Handles outcomes:
   - **Admitted:** Sets headers and calls `next()`.
   - **Throttled (429):** Sets headers including `Retry-After: <seconds>` and sends JSON error response.
   - **Storage Outage (Fail-Closed Default):** Returns `HTTP 503 Service Unavailable`. `Retry-After` is omitted by default to avoid misleading clients with an artificial recovery promise.
-  - **Storage Outage (Fail-Open):** Logs a warning, appends optional internal test diagnostic header `X-RateLimit-Fallback: fail-open`, and calls `next()` to **delegate execution directly to the downstream route handler**.
+  - **Storage Outage (Fail-Open):** Appends diagnostic header `X-RateLimit-Fallback: fail-open` and calls `next()` to **delegate execution directly to the downstream route handler**.
 
-### 3.4 `app/` (Application Wiring)
+### 3.4 `app/create-app.ts` (Application Factory)
 
-- Composes Express routes with clean prefixes:
+- Requires mandatory `limiter` instance to prevent silent unmetered route exposure.
+- Mounts standard endpoints:
   - `GET /health` $\rightarrow$ Unthrottled healthcheck.
   - `GET /api/v1/unlimited` $\rightarrow$ Unthrottled control route.
-  - `GET /api/v1/limited` $\rightarrow$ Protected route wrapped by `rateLimitMiddleware`.
+  - `GET /api/v1/limited` $\rightarrow$ Protected route wrapped by `createRateLimitMiddleware`.
 
 ---
 
@@ -138,13 +165,13 @@ sequenceDiagram
     actor Client
     participant Express as Express App
     participant MW as RateLimit Middleware
-    participant Storage as RateLimiter Storage (Redis / Memory)
+    participant Limiter as RateLimiter (Redis / In-Memory)
     participant Route as GET /api/v1/limited
 
-    Client->>Express: GET /api/v1/limited (X-Client-Id: client_1)
+    Client->>Express: GET /api/v1/limited (IP / Client ID)
     Express->>MW: Handle Request
-    MW->>Storage: incrementAndCheck("client_1", policy)
-    Storage-->>MW: RateLimitResult (allowed: true, remaining: 4, reset: T)
+    MW->>Limiter: consume(clientKey)
+    Limiter-->>MW: RateLimitResult (allowed: true, remaining: 4, resetTimeMs: T)
     MW->>MW: Set X-RateLimit-Limit, Remaining, Reset
     MW->>Route: next()
     Route-->>Express: Response { success: true }
@@ -159,17 +186,17 @@ sequenceDiagram
     actor Client
     participant Express as Express App
     participant MW as RateLimit Middleware
-    participant Storage as RateLimiter Storage (Redis / Memory)
+    participant Limiter as RateLimiter (Redis / In-Memory)
 
-    Client->>Express: GET /api/v1/limited (X-Client-Id: client_1)
+    Client->>Express: GET /api/v1/limited (IP / Client ID)
     Express->>MW: Handle Request
-    MW->>Storage: incrementAndCheck("client_1", policy)
-    Storage-->>MW: RateLimitResult (allowed: false, remaining: 0, reset: T, retryAfter: 35)
+    MW->>Limiter: consume(clientKey)
+    Limiter-->>MW: RateLimitResult (allowed: false, remaining: 0, resetTimeMs: T, retryAfterSeconds: S)
     MW->>MW: Set X-RateLimit-Limit, Remaining, Reset, Retry-After
     MW-->>Client: HTTP 429 Too Many Requests (JSON body + RateLimit headers)
 ```
 
-### 4.3 Redis Outage: Fail-Closed vs Fail-Open
+### 4.3 Storage Outage: Fail-Closed vs Fail-Open
 
 ```mermaid
 sequenceDiagram
@@ -177,18 +204,18 @@ sequenceDiagram
     actor Client
     participant Express as Express App
     participant MW as RateLimit Middleware
-    participant Storage as Redis Storage
+    participant Limiter as RedisFixedWindowRateLimiter
     participant Route as Target Route Handler
 
     Client->>Express: GET /api/v1/limited
     Express->>MW: Handle Request
-    MW->>Storage: incrementAndCheck("client_1", policy)
-    Storage--xMW: Redis Unreachable / Timeout
+    MW->>Limiter: consume(clientKey)
+    Limiter--xMW: Redis Unreachable / Connection Refused
 
     alt Policy is Fail-Closed (Default)
         MW-->>Client: HTTP 503 Service Unavailable (Outage, NOT 429)
     else Policy is Fail-Open
-        MW->>MW: Log warning (append diagnostic header in lab demo)
+        MW->>MW: Set X-RateLimit-Fallback: fail-open
         MW->>Route: next() [Delegates to actual route handler]
         Route-->>Client: Route's actual response (e.g. 200 OK / 201 Created)
     end
@@ -196,10 +223,10 @@ sequenceDiagram
 
 ---
 
-## 5. Dependency Boundaries
+## 5. Dependency Boundaries & Architectural Evolution
 
-1. Zero cyclic dependencies.
-2. `core/` contains no external imports.
-3. `storage/` depends only on `core/` and Redis driver (`ioredis`).
-4. Unit tests against `core/` and `memory-storage.ts` run in $< 50\text{ms}$ with zero network or daemon requirements.
-5. Integration tests against `redis-storage.ts` require a running Redis instance to validate distributed atomicity and server-time coordination.
+1. **Zero cyclic dependencies:** Verified via ESLint and TypeScript compilation.
+2. **`core/` contains no external imports:** Pure domain arithmetic.
+3. **Storage consolidation:** Early exploratory documents proposed abstract `storage.interface.ts` layers with `incrementAndCheck()`. In Phase 06 and Phase 07, this was streamlined directly into the `RateLimiter` interface (`consume(key)`), eliminating unnecessary intermediate layers and unifying in-memory and Redis limiters under one contract.
+4. **Unit test execution:** Pure in-memory unit tests run with zero network dependencies using `VirtualClock`.
+5. **Integration test execution:** Redis integration tests require a live Redis instance to validate distributed atomicity and server-time coordination.

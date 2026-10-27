@@ -73,7 +73,7 @@ Eliminating client-tier clock drift is essential for multi-instance correctness.
 
 ## 8. Existing Tests & Verification Paths
 
-- **Redis Integration Suite:** [`tests/integration/redis-fixed-window.test.ts`](file:///c:/Users/bruno/CV%20Manager/engineering-labs/rate-limiting-lab/tests/integration/redis-fixed-window.test.ts)
+- **Redis Integration Suite:** [`tests/integration/redis-fixed-window.test.ts`](../../tests/integration/redis-fixed-window.test.ts)
   - Section: `Independent Redis Clients (Separate TCP Connections)`
   - Test case: `strictly isolates and synchronizes two independent clients against Redis server time`
 

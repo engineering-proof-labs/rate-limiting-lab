@@ -75,9 +75,9 @@ In modern containerized environments, pods frequently autoscale and restart. Sti
 
 ## 8. Existing Tests & Verification Paths
 
-- **Multi-App HTTP Contract Test:** [`tests/contract/http-concurrency-resilience.test.ts`](file:///c:/Users/bruno/CV%20Manager/engineering-labs/rate-limiting-lab/tests/contract/http-concurrency-resilience.test.ts)
+- **Multi-App HTTP Contract Test:** [`tests/contract/http-concurrency-resilience.test.ts`](../../tests/contract/http-concurrency-resilience.test.ts)
   - Test case: `collectively admits exactly 5 and throttles 15 across 20 concurrent requests split between two independent app instances`
-- **Redis Concurrency Test:** [`tests/integration/redis-fixed-window.test.ts`](file:///c:/Users/bruno/CV%20Manager/engineering-labs/rate-limiting-lab/tests/integration/redis-fixed-window.test.ts)
+- **Redis Concurrency Test:** [`tests/integration/redis-fixed-window.test.ts`](../../tests/integration/redis-fixed-window.test.ts)
   - Test case: `strictly admits exactly 5 and rejects 15 under 20 concurrent requests with Promise.all`
 
 ---

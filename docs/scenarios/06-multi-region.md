@@ -24,16 +24,13 @@ The service expands to a globally distributed multi-region topology spanning thr
 - Region B: `eu-central-1` (Europe)
 - Region C: `ap-southeast-1` (Asia-Pacific)
 
-Clients connect to their geographically closest region via Anycast DNS or Cloudflare/AWS Global Accelerator to achieve sub-50 ms response times.
+Clients connect to their geographically closest region via Anycast DNS or Cloudflare/AWS Global Accelerator to achieve low edge response times.
 
 ---
 
 ## 3. Invalidated Assumptions
 
-1. **Low-Latency Centralization:** Cross-continental network round-trips introduce severe physical speed-of-light latencies:
-   - `eu-central-1` $\leftrightarrow$ `us-east-1`: $\approx 80\text{–}100\text{ ms}$ RTT.
-   - `ap-southeast-1` $\leftrightarrow$ `us-east-1`: $\approx 180\text{–}220\text{ ms}$ RTT.
-     Directly querying a central Redis primary on every request destroys the edge latency benefits of multi-region deployment.
+1. **Low-Latency Centralization:** Cross-continental network round-trips introduce physical transit latencies (e.g. illustrative transatlantic ~80–100 ms RTT, transpacific ~180–220 ms RTT depending on transit routes). Directly querying a central Redis primary on every request destroys the edge latency benefits of multi-region deployment.
 2. **Synchronous Global Consensus:** Under the CAP theorem, when a trans-oceanic network partition severs communication between regions, the system cannot simultaneously guarantee:
    - **Consistency ($C$):** Strict global enforcement of quota $L$ across all regions.
    - **Availability ($A$):** Zero-downtime request admission for partitioned regions without waiting for cross-region synchronization.
@@ -47,11 +44,11 @@ Clients connect to their geographically closest region via Anycast DNS or Cloudf
 - **Mechanism:** A single Redis primary is deployed in `us-east-1`. Application clusters in Europe and Asia route every rate limit check across the WAN to the US primary.
 - **Tradeoffs:**
   - _Advantages:_ Exact global consistency. No risk of overspending quota. Simple operational model.
-  - _Disadvantages:_ Massive latency penalty ($+100\text{–}200\text{ ms}$ on every API call in EU/APAC). If the transatlantic fiber severs, all non-US regions immediately halt (in fail-closed mode) or lose rate limiting entirely (in fail-open mode).
+  - _Disadvantages:_ Severe cross-region latency penalty on every API call in EU/APAC. If transatlantic network connectivity degrades, all non-US regions immediately halt (in fail-closed mode) or lose rate limiting entirely (in fail-open mode).
 
 ### Model 2: Preallocated Regional Budgets (Static Slicing)
 
-- **Mechanism:** The global quota $L$ is statically partitioned into regional quotas based on historical traffic distribution (e.g., $L = 100$ is sliced into: US = 50, EU = 30, APAC = 20). Each region enforces its local budget against a local Redis cluster with $< 1\text{ ms}$ latency.
+- **Mechanism:** The global quota $L$ is statically partitioned into regional quotas based on historical traffic distribution (e.g., $L = 100$ is sliced into: US = 50, EU = 30, APAC = 20). Each region enforces its local budget against a local Redis cluster with intra-region latency.
 - **Tradeoffs:**
   - _Advantages:_ Zero cross-region WAN latency on the request path. Full regional partition survivability.
   - _Disadvantages:_ **Stranded Budget Problem.** If a user sends 40 requests in Europe and then travels to Asia (or sends automated batch traffic exclusively in Asia), their requests in Asia are rejected after 20 calls even though 50 units of quota sit completely idle and unused in the US slice.
@@ -67,8 +64,8 @@ Clients connect to their geographically closest region via Anycast DNS or Cloudf
 
 - **Mechanism:** Each region admits requests against local Redis and asynchronously broadcasts delta increments (`INCRBY`) to peer regions using Redis Enterprise Active-Active (CRDTs) or an event mesh.
 - **Tradeoffs:**
-  - _Advantages:_ Local read/write latency ($< 1\text{ ms}$). High availability during partitions.
-  - _Disadvantages:_ **Bounded Overspend Risk.** Replication delay across WAN ($\approx 100\text{–}300\text{ ms}$) permits concurrent bursts to exceed global limit $L$ by up to $N_{\text{regions}} \times L_{\text{burst}}$ before remote increments reconcile.
+  - _Advantages:_ Low local read/write latency. High availability during partitions.
+  - _Disadvantages:_ **Bounded Overspend Risk.** Replication delay across WAN permits concurrent bursts to exceed global limit $L$ by up to $N_{\text{regions}} \times L_{\text{burst}}$ before remote increments reconcile.
 
 ---
 
@@ -76,10 +73,10 @@ Clients connect to their geographically closest region via Anycast DNS or Cloudf
 
 **Selected Strategy: Workload-Driven Selection.**
 
-| Workload Requirement                             | Recommended Multi-Region Architecture                     | Justification                                                                                                                                             |
-| :----------------------------------------------- | :-------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Strict Security / Financial (Zero Overspend)** | **Model 1: Central Master** or **Regionally Pinned Keys** | Pin tenant data to an authoritative home region via Anycast routing; cross-region requests route back to the home region.                                 |
-| **High-Volume Public APIs / Microservices**      | **Model 4: Asynchronous CRDT Replication**                | Low latency ($< 1\text{ ms}$) is prioritized over exact boundary enforcement. Transient overspend during the 150 ms synchronization window is acceptable. |
+| Workload Requirement                             | Recommended Multi-Region Architecture                     | Justification                                                                                                                                    |
+| :----------------------------------------------- | :-------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Strict Security / Financial (Zero Overspend)** | **Model 1: Central Master** or **Regionally Pinned Keys** | Pin tenant data to an authoritative home region via Anycast routing; cross-region requests route back to the home region.                        |
+| **High-Volume Public APIs / Microservices**      | **Model 4: Asynchronous CRDT Replication**                | Local edge latency is prioritized over exact boundary enforcement. Transient overspend during the asynchronous replication window is acceptable. |
 
 ---
 
@@ -108,14 +105,14 @@ If Region C is cut off from Regions A and B:
 
 ## 8. Existing Tests & Verification Paths
 
-- Local multi-client Redis integration tests: [`tests/integration/redis-fixed-window.test.ts`](file:///c:/Users/bruno/CV%20Manager/engineering-labs/rate-limiting-lab/tests/integration/redis-fixed-window.test.ts)
-- In-memory reference suites: [`tests/unit/fixed-window.test.ts`](file:///c:/Users/bruno/CV%20Manager/engineering-labs/rate-limiting-lab/tests/unit/fixed-window.test.ts), [`tests/unit/token-bucket.test.ts`](file:///c:/Users/bruno/CV%20Manager/engineering-labs/rate-limiting-lab/tests/unit/token-bucket.test.ts), [`tests/unit/sliding-window.test.ts`](file:///c:/Users/bruno/CV%20Manager/engineering-labs/rate-limiting-lab/tests/unit/sliding-window.test.ts)
+- Local multi-client Redis integration tests: [`tests/integration/redis-fixed-window.test.ts`](../../tests/integration/redis-fixed-window.test.ts)
+- In-memory reference suites: [`tests/unit/fixed-window.test.ts`](../../tests/unit/fixed-window.test.ts), [`tests/unit/token-bucket.test.ts`](../../tests/unit/token-bucket.test.ts), [`tests/unit/sliding-window.test.ts`](../../tests/unit/sliding-window.test.ts)
 
 ---
 
 ## 9. Missing Tests & Proposed Experiments
 
-- **Proposed Simulation:** Chaos mesh experiment injecting synthetic 150 ms latency and 50% packet drops between simulated Redis regional clusters to quantify overspend margins under asynchronous replication.
+- **Proposed Simulation:** Chaos mesh experiment injecting synthetic WAN latency and packet loss between simulated regional clusters to quantify overspend margins under asynchronous replication.
 
 ---
 
